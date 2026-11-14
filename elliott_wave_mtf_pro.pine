@@ -233,14 +233,14 @@ bool proj2 = input.bool(true, "Proyeksi", group = gD2, active = ewOn and en2)
 int len2 = input.int(13, "Panjang pivot", minval = 2, maxval = 100, group = gD2, active = ewOn and en2)
 color col2 = input.color(#2962ff, "Warna", group = gD2, active = ewOn and en2)
 
-// The higher timeframes also feed the S/R and OB / S&D zones, so their switch and
+// The higher timeframes also feed the S/R zones, so their switch and
 // timeframe stay editable while Elliott Wave is off.
 string gD3 = "04 - Elliott Wave: timeframe besar 1"
 bool en3 = input.bool(true, "Aktif", group = gD3)
 bool show3 = input.bool(true, "Gambar gelombang", group = gD3, active = ewOn and en3)
 bool proj3 = input.bool(true, "Proyeksi", group = gD3, active = ewOn and en3)
 string tfMode3 = input.string("Auto", "Timeframe", options = ["Auto", "Manual"], group = gD3, inline = "tf3", active = en3,
-     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe chart. Data timeframe besar hanya memakai bar yang sudah ditutup, sehingga hitungan tidak repaint. Timeframe ini juga dipakai zona support dan resistance serta OB dan S&D timeframe besar 1.")
+     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe chart. Data timeframe besar hanya memakai bar yang sudah ditutup, sehingga hitungan tidak repaint. Timeframe ini juga dipakai zona support dan resistance.")
 string tfMan3 = input.timeframe("240", "", group = gD3, inline = "tf3", active = en3)
 int len3 = input.int(5, "Panjang pivot", minval = 2, maxval = 50, group = gD3, active = ewOn and en3)
 color col3 = input.color(#ab47bc, "Warna", group = gD3, active = ewOn and en3)
@@ -250,7 +250,7 @@ bool en4 = input.bool(true, "Aktif", group = gD4)
 bool show4 = input.bool(false, "Gambar gelombang", group = gD4, active = ewOn and en4)
 bool proj4 = input.bool(false, "Proyeksi", group = gD4, active = ewOn and en4)
 string tfMode4 = input.string("Auto", "Timeframe", options = ["Auto", "Manual"], group = gD4, inline = "tf4", active = en4,
-     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe besar 1. Timeframe ini juga dipakai zona support dan resistance serta OB dan S&D timeframe besar 2.")
+     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe besar 1. Timeframe ini juga dipakai zona support dan resistance.")
 string tfMan4 = input.timeframe("D", "", group = gD4, inline = "tf4", active = en4)
 int len4 = input.int(5, "Panjang pivot", minval = 2, maxval = 50, group = gD4, active = ewOn and en4)
 color col4 = input.color(#ff9800, "Warna", group = gD4, active = ewOn and en4)
@@ -345,7 +345,7 @@ float obMaxAtr = input.float(1.0, "Tinggi maksimum (x ATR)", minval = 0.1, step 
      tooltip = "Blok yang lebih tinggi dari ini dipersempit ke badan candle, lalu dipotong ke tinggi ini dari ujung kaki.")
 int obMinQuality = input.int(3, "Kualitas minimum yang ditampilkan (0-5)", minval = 0, maxval = 5, group = gOb, active = showOb,
      tooltip = "Satu poin untuk masing-masing: penembusan minimal 2 ATR, kaki meninggalkan FVG, titik awal kaki menyapu swing sebelumnya, volume candle penembus minimal 1.5x rata-rata 20 bar, dan arah blok searah bias Elliott Wave timeframe di atasnya. Ini hitungan konfluensi, bukan tingkat kemenangan.")
-int obLookback = input.int(50, "Kedalaman pencarian (bar per timeframe)", minval = 10, maxval = 200, group = gOb, active = showOb)
+int obLookback = input.int(50, "Kedalaman pencarian (bar)", minval = 10, maxval = 200, group = gOb, active = showOb)
 int maxOb = input.int(30, "Jumlah order block yang disimpan", minval = 1, maxval = 60, group = gOb, active = showOb)
 color colObBull = input.color(#aeea00, "OB naik", group = gOb, active = showOb)
 color colObBear = input.color(#e040fb, "OB turun", group = gOb, active = showOb)
@@ -366,10 +366,6 @@ int paEach = input.int(2, "OB dan S&D yang tampil di atas dan di bawah harga (ma
 float zoneMaxMitPct = input.float(50.0, "Sembunyikan OB dan S&D yang termitigasi lebih dari (%)", minval = 0.0, maxval = 100.0, step = 5.0, group = gZone, active = showOb or showSd)
 int zoneMaxReturns = input.int(2, "Sembunyikan OB dan S&D yang didatangi lebih dari (kali)", minval = 0, maxval = 20, group = gZone, active = showOb or showSd)
 bool keepInvalidZones = input.bool(false, "Pertahankan OB dan S&D yang sudah batal (abu-abu)", group = gZone, active = showOb or showSd)
-bool paChart = input.bool(true, "Timeframe OB / S&D: chart", group = gZone, active = showOb or showSd)
-bool paTf3 = input.bool(true, "Timeframe OB / S&D: TF besar 1", group = gZone, active = showOb or showSd)
-bool paTf4 = input.bool(false, "Timeframe OB / S&D: TF besar 2", group = gZone, active = showOb or showSd,
-     tooltip = "Zona timeframe besar muncul setelah candle timeframe tersebut ditutup.")
 
 string gFvg = "14 - Fair value gap (FVG)"
 bool showFvg = input.bool(true, "Tampilkan fair value gap (FVG)", group = gFvg,
@@ -960,18 +956,6 @@ paScan(simple int swLen, simple int depth, simple float impMult, simple float ba
         hClose.shift()
         hTime.shift()
     [obDir, obTop, obBottom, obTime, obFlags, sdDir, sdTop, sdBottom, sdTime]
-
-// Same scan shifted by one bar. Fetched with lookahead on, only closed
-// higher-timeframe bars reach the chart (no repaint).
-paScanClosed(simple int swLen, simple int depth, simple float impMult, simple float baseMult, simple int baseMax, simple int aLen, simple float dispMult, simple float maxMult) =>
-    [od, ot, ob, otm, of, sd, st, sb, stm] = paScan(swLen, depth, impMult, baseMult, baseMax, aLen, dispMult, maxMult)
-    [od[1], ot[1], ob[1], otm[1], of[1], sd[1], st[1], sb[1], stm[1]]
-
-// Everything one higher timeframe supplies, fetched in a single request.security() call.
-htfAll(int len, int oscLen, simple int swLen, simple int depth, simple float impMult, simple float baseMult, simple int baseMax, simple int aLen, simple float dispMult, simple float maxMult) =>
-    [ph, pl, t, o, a, c, h, l] = htfData(len, oscLen)
-    [od, ot, ob, otm, of, sd, st, sb, stm] = paScanClosed(swLen, depth, impMult, baseMult, baseMax, aLen, dispMult, maxMult)
-    [ph, pl, t, o, a, c, h, l, od, ot, ob, otm, of, sd, st, sb, stm]
 
 // Chart time of the highest high and the lowest low inside each recent bar of tf,
 // so higher timeframe waves are drawn on the candle that made the extreme.
@@ -2339,11 +2323,9 @@ float ph1 = ta.pivothigh(high, pLen1, pLen1)
 float pl1 = ta.pivotlow(low, pLen1, pLen1)
 float ph2 = ta.pivothigh(high, pLen2, pLen2)
 float pl2 = ta.pivotlow(low, pLen2, pLen2)
-// One request per higher timeframe carries the wave pivots and the order block / supply and demand scan.
-[ph3, pl3, t3, o3, atr3, cls3, his3, los3, p3ObD, p3ObT, p3ObB, p3ObTm, p3ObF, p3SdD, p3SdT, p3SdB, p3SdTm] = request.security(dataTicker, tf3,
-     htfAll(pLen3, rsiLen, swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr), lookahead = barmerge.lookahead_on)
-[ph4, pl4, t4, o4, atr4, cls4, his4, los4, p4ObD, p4ObT, p4ObB, p4ObTm, p4ObF, p4SdD, p4SdT, p4SdB, p4SdTm] = request.security(dataTicker, tf4,
-     htfAll(pLen4, rsiLen, swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr), lookahead = barmerge.lookahead_on)
+// One request per higher timeframe carries the wave pivots and the S/R inputs.
+[ph3, pl3, t3, o3, atr3, cls3, his3, los3] = request.security(dataTicker, tf3, htfData(pLen3, rsiLen), lookahead = barmerge.lookahead_on)
+[ph4, pl4, t4, o4, atr4, cls4, his4, los4] = request.security(dataTicker, tf4, htfData(pLen4, rsiLen), lookahead = barmerge.lookahead_on)
 bool new3 = timeframe.change(tf3)
 bool new4 = timeframe.change(tf4)
 [keys3, hiT3, loT3] = extremeTimes(tf3, pLen3 + 4)
@@ -2694,7 +2676,6 @@ alertcondition(srBreakDown, "Support tertembus", "Support tertembus di {{ticker}
 
 // -- Confluence: order blocks, supply / demand and fair value gaps -------
 [pcObD, pcObT, pcObB, pcObTm, pcObF, pcSdD, pcSdT, pcSdB, pcSdTm] = paScan(swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr)
-// The higher timeframe scans (p3*, p4*) come with the wave data in the Data section.
 
 var array<PaZone> obZones = array.new<PaZone>()
 var array<PaZone> sdZones = array.new<PaZone>()
@@ -2702,8 +2683,8 @@ if barstate.isconfirmed
     updatePaZones(obZones)
     updatePaZones(sdZones)
 
-// Adds the zones one source found on this bar. rank: 0 chart, 1 HTF 1, 2 HTF 2.
-// htfBias is the Elliott Wave bias of the next higher degree, used for the fifth quality point.
+// Adds the zones the chart scan found on this bar (rank 0: order blocks and supply / demand
+// run on the chart timeframe only). htfBias is the Elliott Wave bias of the next higher degree, used for the fifth quality point.
 // Returns the direction of a new order block and of a new supply / demand zone (0 = none).
 f_addPa(int rank, string tag, int htfBias, int obD0, float obT, float obB, int obTm, int obF, int sdD0, float sdT, float sdB, int sdTm) =>
     int obD = nz(obD0)
@@ -2723,18 +2704,10 @@ f_addPa(int rank, string tag, int htfBias, int obD0, float obT, float obB, int o
 
 int newObDir = 0
 int newSdDir = 0
-if paChart and barstate.isconfirmed
+if barstate.isconfirmed
     [o0, s0] = f_addPa(0, L1.tfText, L3.active ? L3.bias : 0, pcObD, pcObT, pcObB, pcObTm, pcObF, pcSdD, pcSdT, pcSdB, pcSdTm)
-    newObDir := o0 != 0 ? o0 : newObDir
-    newSdDir := s0 != 0 ? s0 : newSdDir
-if paTf3 and act3 and new3 and barstate.isconfirmed
-    [o1, s1z] = f_addPa(1, L3.tfText, L4.active ? L4.bias : 0, p3ObD, p3ObT, p3ObB, p3ObTm, p3ObF, p3SdD, p3SdT, p3SdB, p3SdTm)
-    newObDir := o1 != 0 ? o1 : newObDir
-    newSdDir := s1z != 0 ? s1z : newSdDir
-if paTf4 and act4 and new4 and barstate.isconfirmed
-    [o2, s2z] = f_addPa(2, L4.tfText, 0, p4ObD, p4ObT, p4ObB, p4ObTm, p4ObF, p4SdD, p4SdT, p4SdB, p4SdTm)
-    newObDir := o2 != 0 ? o2 : newObDir
-    newSdDir := s2z != 0 ? s2z : newSdDir
+    newObDir := o0
+    newSdDir := s0
 
 // Fair value gaps: three-candle imbalance, removed once price fills it.
 gapBox(Gap g) =>
