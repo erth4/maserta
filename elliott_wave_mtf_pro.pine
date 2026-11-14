@@ -396,7 +396,7 @@ f_tfAtLeast(simple int sec) =>
     sec <= 60 ? "1" : sec <= 300 ? "5" : sec <= 900 ? "15" : sec <= 3600 ? "60" : sec <= 14400 ? "240" :
      sec <= 86400 ? "D" : sec <= 604800 ? "W" : sec <= 2678400 ? "M" : sec <= 8035200 ? "3M" : "12M"
 
-f_tfLabel(string tf) =>
+f_tfLabel(simple string tf) =>
     int s = timeframe.in_seconds(tf)
     s < 60 ? str.tostring(s) + "s" : s < 3600 ? str.tostring(math.round(s / 60)) + "m" : s < 86400 ? str.tostring(math.round(s / 3600)) + "H" :
      s < 604800 ? str.tostring(math.round(s / 86400)) + "D" : s < 2419200 ? str.tostring(math.round(s / 604800)) + "W" :
