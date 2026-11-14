@@ -392,7 +392,7 @@ int MAX_PIVOTS = 200
 // Drawings far to the right of the last candle are not reliable, so a longer path is compressed.
 int PATH_MAX_BARS = 400
 
-f_tfAtLeast(int sec) =>
+f_tfAtLeast(simple int sec) =>
     sec <= 60 ? "1" : sec <= 300 ? "5" : sec <= 900 ? "15" : sec <= 3600 ? "60" : sec <= 14400 ? "240" :
      sec <= 86400 ? "D" : sec <= 604800 ? "W" : sec <= 2678400 ? "M" : sec <= 8035200 ? "3M" : "12M"
 
@@ -444,7 +444,7 @@ f_letter(int deg, string s) =>
 f_waveName(int deg, bool impulse, int i) =>
     f_wrap(deg, str.split(impulse ? (deg == 0 ? "i,ii,iii,iv,v" : "1,2,3,4,5") : deg == 0 ? "a,b,c" : "A,B,C", ",").get(i - 1))
 
-f_scaleLen(int len, int sec) =>
+f_scaleLen(simple int len, simple int sec) =>
     not autoLen ? len : sec >= 2419200 ? math.max(2, math.round(len * 0.4)) : sec >= 604800 ? math.max(2, math.round(len * 0.6)) : len
 
 f_lineAt(int x1, float y1, int x2, float y2, int x) =>
@@ -960,7 +960,7 @@ paScan(simple int swLen, simple int depth, simple float impMult, simple float ba
 // Chart time of the highest high and the lowest low inside each recent bar of tf,
 // so higher timeframe waves are drawn on the candle that made the extreme.
 // Must run on every chart bar; keep is the number of higher timeframe bars remembered.
-extremeTimes(string tf, int keep) =>
+extremeTimes(simple string tf, int keep) =>
     var array<int> keys = array.new<int>()
     var array<float> his = array.new<float>()
     var array<int> hiTimes = array.new<int>()
