@@ -484,7 +484,7 @@ f_textSize(string s) =>
 // Higher timeframe pivots from closed bars only: the caller requests this with
 // lookahead on, so the [1] offset keeps every value fixed once it appears.
 // The closed bar's close, high and low drive the trigger, target and invalidation checks.
-htfData(int len, int oscLen) =>
+htfData(simple int len, simple int oscLen) =>
     float ph = ta.pivothigh(high, len, len)
     float pl = ta.pivotlow(low, len, len)
     float osc = ta.rsi(close, oscLen)
@@ -2467,7 +2467,7 @@ if ewOn and cycOn and barstate.islast
              tooltip = cycTxt + ". Perkiraan waktu, bukan level harga. Dasar siklus yang jatuh di akhir gelombang C atau 2 derajat besar memperkuat skenario tersebut."))
 
 // -- Confluence: moving averages -----------------------------------------
-f_ma(int len) =>
+f_ma(simple int len) =>
     float e = ta.ema(close, len)
     float m = ta.sma(close, len)
     maType == "EMA" ? e : m
