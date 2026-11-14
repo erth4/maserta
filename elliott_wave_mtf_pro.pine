@@ -2467,14 +2467,12 @@ if ewOn and cycOn and barstate.islast
              tooltip = cycTxt + ". Perkiraan waktu, bukan level harga. Dasar siklus yang jatuh di akhir gelombang C atau 2 derajat besar memperkuat skenario tersebut."))
 
 // -- Confluence: moving averages -----------------------------------------
-f_ma(simple int len) =>
-    float e = ta.ema(close, len)
-    float m = ta.sma(close, len)
-    maType == "EMA" ? e : m
-
-float ma1 = f_ma(ma1Len)
-float ma2 = f_ma(ma2Len)
-float ma3 = f_ma(ma3Len)
+// Called directly with the input lengths, which are always simple int. useEma comes from an
+// input and stays fixed for the whole run, so the chosen average is computed on every bar.
+bool useEma = maType == "EMA"
+float ma1 = useEma ? ta.ema(close, ma1Len) : ta.sma(close, ma1Len)
+float ma2 = useEma ? ta.ema(close, ma2Len) : ta.sma(close, ma2Len)
+float ma3 = useEma ? ta.ema(close, ma3Len) : ta.sma(close, ma3Len)
 pMa1 = plot(showMa ? ma1 : na, "MA cepat", color = color.new(#00bcd4, 10), linewidth = 1)
 pMa2 = plot(showMa ? ma2 : na, "MA tengah", color = color.new(#ff9800, 0), linewidth = 2)
 plot(showMa ? ma3 : na, "MA lambat", color = color.new(chart.fg_color, 15), linewidth = 2)
