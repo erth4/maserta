@@ -430,8 +430,9 @@ bool isDark = (color.r(chart.bg_color) * 0.299 + color.g(chart.bg_color) * 0.587
 f_mix(color c, color t, float k) =>
     color.rgb(color.r(c) + (color.r(t) - color.r(c)) * k, color.g(c) + (color.g(t) - color.g(c)) * k, color.b(c) + (color.b(t) - color.b(c)) * k)
 
+// One f_mix call: f_txt has many call sites, and each one adds the body to the compiled script.
 f_txt(color c) =>
-    not autoContrast ? c : isDark ? f_mix(c, color.white, 0.45) : f_mix(c, color.black, 0.25)
+    not autoContrast ? c : f_mix(c, isDark ? color.white : color.black, isDark ? 0.45 : 0.25)
 
 f_wrap(int deg, string core) =>
     deg == 2 ? "(" + core + ")" : deg == 3 ? "[" + core + "]" : core
@@ -2403,39 +2404,8 @@ if barstate.islast
 // Otomatis: the cycle is the mean low-to-low spacing of the last cycSamples pivot lows of one
 // wave degree, so it follows the symbol and timeframe; one standard deviation of that spacing
 // is the window around the next estimated low. Manual: fixed calendar months from an anchor
-// (UTC, day capped at 28 so every month has it). Everything runs on the last bar only.
-int cycBase = year(cycAnchor, "UTC") * 12 + month(cycAnchor, "UTC") - 1
-int cycDay = math.min(dayofmonth(cycAnchor, "UTC"), 28)
-
-f_cycleTime(int k) =>
-    int tm = cycBase + k * cycMonths
-    timestamp("UTC", int(math.floor(tm / 12)), tm % 12 + 1, cycDay, 0, 0)
-
-// Times of the last cnt + 1 pivot lows of a degree (newest first), with the mean and the
-// standard deviation of their spacing; both na with fewer than two lows.
-f_cycleAuto(Layer ly, int cnt) =>
-    array<int> ts = array.new<int>()
-    int n = ly.pivots.size()
-    if n > 0
-        for i = n - 1 to 0
-            Pivot p = ly.pivots.get(i)
-            if p.dir == -1
-                ts.push(p.time)
-                if ts.size() > cnt
-                    break
-    float avg = na
-    float dev = na
-    int m = ts.size() - 1
-    if m >= 1
-        float sum = 0.0
-        for i = 0 to m - 1
-            sum += ts.get(i) - ts.get(i + 1)
-        avg := sum / m
-        float sq = 0.0
-        for i = 0 to m - 1
-            sq += math.pow(ts.get(i) - ts.get(i + 1) - avg, 2)
-        dev := math.sqrt(sq / m)
-    [ts, avg, dev]
+// (UTC, day capped at 28 so every month has it). Runs on the last bar only, and every helper
+// has a single call site: each call site adds the helper body to the compiled script.
 
 // Readable duration: the unit follows the size, so any timeframe reads naturally.
 f_dur(float ms) =>
@@ -2443,66 +2413,74 @@ f_dur(float ms) =>
     d >= 365 ? str.tostring(d / 365.25, "#.#") + " tahun" : d >= 60 ? str.tostring(d / 30.44, "#.#") + " bulan" :
      d >= 14 ? str.tostring(d / 7, "#.#") + " minggu" : d >= 1 ? str.tostring(d, "#.#") + " hari" : str.tostring(d * 24, "#.#") + " jam"
 
-f_date(int t) =>
-    str.format_time(t, chartSec < 86400 ? "dd MMM yyyy HH:mm" : "dd MMM yyyy", syminfo.timezone)
-
 var array<line> cycLines = array.new<line>()
 var array<label> cycLabels = array.new<label>()
-int cycStart = na
-int cycNext = na
-float cycLen = na
-float cycDev = na
-string cycSrc = ""
+string cycTxt = ""
 if ewOn and cycOn and barstate.islast
     while cycLines.size() > 0
         cycLines.pop().delete()
     while cycLabels.size() > 0
         cycLabels.pop().delete()
+    // Cycle lows, newest first; marks.first() is the start of the current cycle.
     array<int> marks = array.new<int>()
+    int cycNext = na
+    float cycLen = na
+    float cycDev = 0.0
+    string cycSrc = ""
     if cycMode == "Manual"
-        int kNow = int(math.floor((year(time, "UTC") * 12 + month(time, "UTC") - 1 - cycBase) / cycMonths))
-        if time < f_cycleTime(kNow)
-            kNow -= 1
-        for j = kNow - 2 to kNow
-            marks.push(f_cycleTime(j))
-        cycStart := f_cycleTime(kNow)
-        cycNext := f_cycleTime(kNow + 1)
-        cycLen := cycNext - cycStart
+        int base = year(cycAnchor, "UTC") * 12 + month(cycAnchor, "UTC") - 1
+        int day = math.min(dayofmonth(cycAnchor, "UTC"), 28)
+        int mNow = year(time, "UTC") * 12 + month(time, "UTC") - 1 - base - (dayofmonth(time, "UTC") < day ? 1 : 0)
+        int kNow = int(math.floor(mNow / cycMonths))
+        for j = kNow + 1 to kNow - 2
+            int tm = base + j * cycMonths
+            marks.push(timestamp("UTC", int(math.floor(tm / 12)), tm % 12 + 1, day, 0, 0))
+        cycNext := marks.shift()
+        cycLen := cycNext - marks.first()
         cycSrc := "manual " + str.tostring(cycMonths) + " bulan"
     else
         int want = cycDegIn == "Minor" ? 0 : cycDegIn == "Major" ? 1 : cycDegIn == "TF besar 1" ? 2 : cycDegIn == "TF besar 2" ? 3 : -1
         // Largest degree first; the first one with at least two lows is used.
         for i = 3 to 0
             Layer ly = layers.get(i)
-            if na(cycLen) and ly.active and (want < 0 or want == i)
-                [ts, avg, dev] = f_cycleAuto(ly, cycSamples)
-                if not na(avg) and avg > 0
-                    int t0 = ts.get(0)
-                    // The next estimate is the first multiple of the cycle after the current bar.
-                    int k = math.max(1, int(math.ceil((time - t0) / avg)))
-                    cycLen := avg
-                    cycDev := dev
-                    cycStart := t0
-                    cycNext := t0 + math.round(k * avg)
-                    marks := ts
-                    cycSrc := "otomatis, " + ly.name + " " + ly.tfText + ", rata-rata " + str.tostring(ts.size() - 1) + " jarak low ke low"
+            if marks.size() < 2 and ly.active and (want < 0 or want == i)
+                marks.clear()
+                int n = ly.pivots.size()
+                if n > 0
+                    for q = n - 1 to 0
+                        Pivot p = ly.pivots.get(q)
+                        if p.dir == -1 and marks.size() <= cycSamples
+                            marks.push(p.time)
+                cycSrc := "otomatis, " + ly.name + " " + ly.tfText + ", rata-rata " + str.tostring(marks.size() - 1) + " jarak low ke low"
+        int m = marks.size() - 1
+        if m >= 1
+            cycLen := (marks.first() - marks.last()) / m
+            float sq = 0.0
+            for i = 0 to m - 1
+                sq += math.pow(marks.get(i) - marks.get(i + 1) - cycLen, 2)
+            cycDev := math.sqrt(sq / m)
+            // The next estimate is the first multiple of the cycle after the current bar.
+            cycNext := marks.first() + math.round(math.max(1, math.ceil((time - marks.first()) / cycLen)) * cycLen)
     if not na(cycNext)
-        for tc in marks
-            cycLines.push(line.new(tc, close, tc, close * 1.01, xloc = xloc.bar_time, extend = extend.both,
-                 color = color.new(colInv, 55), style = line.style_dotted, width = 1))
-        cycLines.push(line.new(cycNext, close, cycNext, close * 1.01, xloc = xloc.bar_time, extend = extend.both,
-             color = color.new(colInv, 15), style = line.style_dashed, width = 2))
-        if not na(cycDev) and cycDev > 0
-            for s in array.from(-1, 1)
-                int tw = cycNext + math.round(s * cycDev)
-                cycLines.push(line.new(tw, close, tw, close * 1.01, xloc = xloc.bar_time, extend = extend.both,
-                     color = color.new(colInv, 75), style = line.style_dotted, width = 1))
-        string tip = "Siklus " + cycSrc + ", panjang " + f_dur(cycLen) + (na(cycDev) ? "" : " ± " + f_dur(cycDev)) +
-             ". Perkiraan waktu, bukan level harga. Dasar siklus yang jatuh di akhir gelombang C atau 2 derajat besar memperkuat skenario tersebut."
-        cycLabels.push(label.new(cycStart, high, (cycMode == "Manual" ? "Awal siklus\n" : "Low siklus terakhir\n") + f_date(cycStart),
-             xloc = xloc.bar_time, style = label.style_label_down, color = color.new(colInv, 100), textcolor = f_txt(colInv), size = size.small, tooltip = tip))
-        cycLabels.push(label.new(cycNext, high, "Perkiraan dasar siklus\n" + f_date(cycNext) + (na(cycDev) or cycDev <= 0 ? "" : "\n± " + f_dur(cycDev)),
-             xloc = xloc.bar_time, style = label.style_label_down, color = color.new(colInv, 100), textcolor = f_txt(colInv), size = size.small, tooltip = tip))
+        array<string> d = array.new<string>()
+        for v in array.from(cycLen, cycDev, float(cycNext - time))
+            d.push(f_dur(v))
+        string fmt = chartSec < 86400 ? "dd MMM yyyy HH:mm" : "dd MMM yyyy"
+        string devTxt = cycDev > 0 ? " ± " + d.get(1) : ""
+        string nextTxt = str.format_time(cycNext, fmt, syminfo.timezone)
+        cycTxt := "Siklus " + cycSrc + ": panjang " + d.get(0) + devTxt + ", mulai " + str.format_time(marks.first(), fmt, syminfo.timezone) +
+             ", perkiraan dasar berikutnya " + nextTxt + " (" + d.get(2) + " lagi)"
+        // Past cycle lows dotted, the estimate dashed, and the ± one deviation window faint.
+        for s in array.from(0, -1, 1)
+            marks.push(cycNext + math.round(s * cycDev))
+        int nPast = marks.size() - 3
+        for [i, tc] in marks
+            if i < nPast or i == nPast or cycDev > 0
+                cycLines.push(line.new(tc, close, tc, close * 1.01, xloc = xloc.bar_time, extend = extend.both,
+                     color = color.new(colInv, i < nPast ? 55 : i == nPast ? 15 : 75), style = i == nPast ? line.style_dashed : line.style_dotted, width = i == nPast ? 2 : 1))
+        cycLabels.push(label.new(cycNext, high, "Perkiraan dasar siklus\n" + nextTxt + devTxt, xloc = xloc.bar_time, style = label.style_label_down,
+             color = color.new(colInv, 100), textcolor = f_txt(colInv), size = size.small,
+             tooltip = cycTxt + ". Perkiraan waktu, bukan level harga. Dasar siklus yang jatuh di akhir gelombang C atau 2 derajat besar memperkuat skenario tersebut."))
 
 // -- Confluence: moving averages -----------------------------------------
 f_ma(int len) =>
@@ -3049,14 +3027,17 @@ f_confWith(float y, float tol) =>
 
 // Projection captions are rebuilt from their stored text, color and line price on every
 // pass and collected from every degree into one caption column. A level that coincides
-// with an S/R zone or liquidity level gets a star and that level.
+// with an S/R zone or liquidity level gets a star and that level. The last pass (i == n)
+// checks the target for the dashboard, so f_confWith keeps a single call site.
 method collectProj(Layer this, array<label> lbs, array<float> pr, array<color> cs) =>
     int n = math.min(this.projLabels.size(), math.min(this.projLines.size(), this.projTexts.size()))
-    if n > 0
-        for i = 0 to n - 1
+    for i = 0 to n
+        float y = i < n ? this.projLines.get(i).get_y1() : this.target
+        string cf = f_confWith(y, this.atrTf * confAtr)
+        if i == n
+            this.tgtConf := cf
+        else
             label lb = this.projLabels.get(i)
-            float y = this.projLines.get(i).get_y1()
-            string cf = f_confWith(y, this.atrTf * confAtr)
             lb.set_text(this.projTexts.get(i) + (cf == "" ? "" : "  ★ " + cf))
             lb.set_textcolor(f_txt(this.projCols.get(i)))
             lbs.push(lb)
@@ -3169,8 +3150,6 @@ if barstate.islast
     chipR.clear()
     chipY.clear()
     chipN.clear()
-    for ly in layers
-        ly.tgtConf := f_confWith(ly.target, ly.atrTf * confAtr)
     float capGap = math.max(nz(visHigh - visLow) * 0.045, math.max(nz(atrV) * 0.35, syminfo.mintick * 10))
     array<label> colA = array.new<label>()
     array<float> priceA = array.new<float>()
@@ -3278,6 +3257,4 @@ if showTable and barstate.islast
     dash.cell(1, 9, maTxt, text_color = f_txt(maCol), text_size = sz)
     if ewOn and cycOn
         dash.cell(0, 10, "Siklus waktu", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
-        dash.cell(1, 10, na(cycNext) ? "Belum cukup low pivot untuk mengukur siklus" :
-             "Siklus " + cycSrc + ": panjang " + f_dur(cycLen) + (na(cycDev) ? "" : " ± " + f_dur(cycDev)) + ", mulai " + f_date(cycStart) +
-             ", perkiraan dasar berikutnya " + f_date(cycNext) + " (" + f_dur(cycNext - time) + " lagi)", text_color = fg, text_size = sz)
+        dash.cell(1, 10, cycTxt == "" ? "Belum cukup low pivot untuk mengukur siklus" : cycTxt, text_color = fg, text_size = sz)
