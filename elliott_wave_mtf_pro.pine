@@ -1,0 +1,3205 @@
+//@version=6
+// @author Ertha Dwi Setiyawan
+indicator("Elliott Wave MTF Pro", shorttitle = "EW MTF", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 250)
+
+// -- Types ---------------------------------------------------------------
+type Pivot
+    float price
+    int time
+    int dir
+    float osc
+
+// kind: 1 = impulse or diagonal, 2 = correction (ABC, WXY, WXYXZ), 3 = triangle.
+// dir is the direction of the move. role (triangle only): 4 = wave 4, 2 = wave B.
+// wLen: wave W of a correction (for the next Y or Z), the widest leg of a wave 4
+// triangle, or wave A before a wave B triangle. hasShelf: this pattern replaced the
+// previous correction, which is kept hidden on the layer shelf until this one is cancelled.
+type Pattern
+    int kind
+    int dir
+    int startTime
+    int endTime
+    float startPrice
+    float endPrice
+    float score
+    array<line> lines
+    array<label> labels
+    int role = 0
+    string name = ""
+    float wLen = na
+    bool hasShelf = false
+    array<int> labDirs
+    array<string> labBase
+    // Impulse only: ext is the motive wave that extended into five sub-waves (1, 3 or 5,
+    // 0 for none); extW2 is the wave 2 end inside an extended wave 5 (double retracement target).
+    int ext = 0
+    float extW2 = na
+
+// Order block or supply / demand zone. dir 1 is bullish (demand), -1 bearish (supply).
+type PaZone
+    box b
+    int dir
+    bool active
+    string txt
+    color c
+    int rank
+    int touches = 0
+    int lastTouch = na
+    float depth = na
+    int bgT = 85
+    int quality = -1
+    int leftTime = na
+    int bornBar = na
+
+type Gap
+    box b
+    float top
+    float bot
+    bool bull
+    float depth = na
+    int left = na
+
+// Support / resistance zone from merged pivots. role: 1 support, -1 resistance.
+type Zone
+    float price
+    int touches
+    int bornTime
+    int role
+    string tf
+
+type SrCand
+    float price
+    float half
+    int role
+    string txt
+    int born
+    bool used = false
+
+type LiqLevel
+    float price
+    bool buySide
+    bool equalLevel
+    line ln
+    label tag
+
+// One leg of a projected path. t is the estimated end time; t0 and y0 (start time and price)
+// are set on the first leg of each scenario only. lc and tc are the line and text colours
+// restored when a hidden leg shows again; dir and base rebuild the label text.
+type PathLeg
+    line ln
+    label lb
+    int t
+    int t0
+    float y0
+    color lc
+    color tc
+    string tip
+    int dir
+    string base
+    bool hide = false
+
+// One wave degree. setupKind: 1 = wave 3 developing, 2 = wave 5 developing,
+// 3 = impulse complete, 4 = wave C developing, 5 = wave 4 pullback,
+// 6 = correction complete, 7 = wave 5 thrust after a wave 4 triangle,
+// 8 = candidate count from the last swings when no rule-based count fits (candDir is
+// its direction; bias stays 0 so it never feeds signals, filters or OB quality).
+// px: close of the last finished bar of the layer's timeframe.
+type Layer
+    string name
+    string tag
+    string tfText
+    int deg
+    color col
+    bool active
+    bool show
+    bool proj
+    array<Pivot> pivots
+    array<Pattern> patterns
+    array<line> projLines
+    array<label> projLabels
+    array<box> projBoxes
+    array<PathLeg> path
+    array<line> devLines
+    array<label> devLabels
+    array<int> devDirs
+    array<string> devBase
+    array<string> projTexts
+    array<color> projCols
+    array<Pattern> shelf
+    float px = na
+    // px when the count was last rebuilt, so a deferred render reproduces the same targets.
+    float procPx = na
+    bool altDraw = false
+    int altDir = 0
+    int altT0 = na
+    float altP0 = na
+    float altInv = na
+    float altOver = na
+    int altMs = na
+    int altStart = -1
+    int replacedTime = 0
+    string state = "Belum ada hitungan valid"
+    string swingTxt = "-"
+    int setupKind = 0
+    int candDir = 0
+    int bias = 0
+    float inv = na
+    float target = na
+    int tgtDir = 0
+    float trigger = na
+    float stopRef = na
+    float invHit = na
+    bool triggerFired = false
+    bool targetHit = false
+    float score = na
+    float setupScore = na
+    string fracTxt = ""
+    // S/R zone or liquidity level the target coincides with ("" for none), set on the last bar.
+    string tgtConf = ""
+    // Projections are drawn only while live (the last bars); on older bars the count is
+    // computed without drawings and renderPending asks step() to draw it once on the last bar.
+    bool live = false
+    bool renderPending = false
+    // First leg of the primary path (start time and price, end time and price), kept as
+    // data so the alternative scenario does not depend on drawn objects.
+    int leg0T0 = na
+    float leg0P0 = na
+    int leg0T1 = na
+    float leg0Y = na
+    int evImpulse = 0
+    bool evDiv = false
+    bool evEndDiag = false
+    int evCorr = 0
+    bool evTri = false
+    int evTrigger = 0
+    bool evInvalid = false
+    bool evTarget = false
+
+// -- Inputs --------------------------------------------------------------
+// Each feature group starts with its master switch; the inputs below it use
+// active = <master> so they are greyed out while the feature is off.
+string gEng = "01 - Elliott Wave"
+bool ewOn = input.bool(true, "Aktifkan Elliott Wave", group = gEng,
+     tooltip = "Bila tidak dicentang, seluruh hitungan, gambar gelombang, proyeksi, zona reaksi, sinyal, dan peringatan Elliott Wave dimatikan. Bias Elliott Wave pada kualitas OB juga tidak dipakai.")
+int rsiLen = input.int(14, "Panjang RSI momentum", minval = 2, group = gEng, active = ewOn,
+     tooltip = "Nilai RSI disimpan di setiap pivot. RSI di puncak gelombang 5 yang lebih rendah daripada di puncak gelombang 3 (atau kebalikannya pada tren turun) dihitung sebagai divergensi momentum.")
+int minScore = input.int(45, "Skor impuls minimum", minval = 0, maxval = 100, group = gEng, active = ewOn,
+     tooltip = "Impuls harus lolos semua aturan Elliott dan mencapai skor pedoman ini sebelum digambar. Skor memakai rasio Fibonacci EWF: gelombang 2 = 50-85.4% gelombang 1, gelombang 3 = 161.8/200/261.8/323.6% gelombang 1, gelombang 4 = 14.6-38.2% gelombang 3 (maksimal 50%), gelombang 5 = gelombang 1, 61.8% gelombang 1-3, atau 123.6-161.8% gelombang 4.")
+bool needDiv = input.bool(false, "Divergensi gelombang 5 wajib", group = gEng, active = ewOn,
+     tooltip = "EWF menyebut gelombang 5 perlu diakhiri divergensi momentum. Aktifkan agar hanya impuls dengan divergensi RSI yang digambar.")
+bool allowDiag = input.bool(true, "Izinkan diagonal (bentuk baji dengan overlap)", group = gEng, active = ewOn,
+     tooltip = "Diagonal harus berbentuk baji dan gelombang 4 masuk ke wilayah gelombang 1. Tanpa overlap, pola dihitung sebagai impuls. Diagonal awal (leading) muncul sebagai gelombang 1 atau A. Diagonal akhir (ending) muncul sebagai gelombang 5 atau C dan menandakan tren melemah. Struktur internal 5-3-5-3-5 atau 3-3-3-3-3 tidak dapat diperiksa dari satu derajat pivot.")
+bool allowTrunc = input.bool(false, "Izinkan gelombang 5 terpotong (truncation)", group = gEng, active = ewOn)
+bool needBos = input.bool(true, "Gelombang 1 wajib menembus swing sebelumnya", group = gEng, active = ewOn,
+     tooltip = "Hitungan gelombang 1-2, 1-2-3, 1-2-3-4, dan impuls selesai hanya diterima jika gelombang 1 menembus swing high sebelumnya (tren naik) atau swing low sebelumnya (tren turun). Syarat ini menyaring hitungan yang dimulai di tengah koreksi.")
+bool detectTri = input.bool(true, "Deteksi triangle ABCDE (gelombang 4 atau B)", group = gEng, active = ewOn)
+bool detectCombo = input.bool(true, "Deteksi koreksi kombinasi WXY dan WXYXZ", group = gEng, active = ewOn,
+     tooltip = "WXY (7 swing) dan WXYXZ (11 swing). X = 50-85.4% dari W, Y dan Z = 61.8/100/123.6% dari W, dan Y tidak boleh melewati 161.8% dari W.")
+bool showWavePrice = input.bool(true, "Tampilkan harga pada label gelombang dan jalur proyeksi", group = gEng, active = ewOn,
+     tooltip = "Menuliskan harga di samping nama gelombang, misalnya 0  74512.3 atau a?  68210.5, pada gelombang selesai, hitungan berjalan, awal 0, dan titik perkiraan jalur proyeksi. Level target sudah selalu menampilkan harga.")
+bool showRatios = input.bool(true, "Tampilkan rasio Fibonacci pada label gelombang", group = gEng, active = ewOn)
+int maxPatterns = input.int(8, "Jumlah pola selesai yang disimpan per derajat", minval = 1, maxval = 25, group = gEng, active = ewOn,
+     tooltip = "Impuls terakhir tetap disimpan walaupun melebihi batas ini, karena koreksi berikutnya diukur dari impuls tersebut.")
+int projBars = input.int(25, "Panjang proyeksi (bar)", minval = 5, maxval = 300, group = gEng, active = ewOn)
+string projDetail = input.string("Ringkas", "Detail proyeksi", options = ["Ringkas", "Lengkap"], group = gEng, active = ewOn,
+     tooltip = "Ringkas: zona utama, target terpilih (garis tegas), pemicu gelombang 3, dan invalidasi. Lengkap: ditambah semua level Fibonacci alternatif (garis titik-titik).")
+bool showPath = input.bool(true, "Jalur gelombang ke depan", group = gEng, active = ewOn,
+     tooltip = "Menggambar garis putus-putus dari pivot terakhir melalui gelombang berikutnya yang diperkirakan (misalnya 3? 4? 5? atau A? B? C?) pada derajat yang proyeksinya aktif. Harga memakai rasio Fibonacci yang sama dengan level proyeksi. Waktu tiap titik diperkirakan dari durasi gelombang sebelumnya, dan harga dapat mencapainya lebih cepat atau lebih lambat.")
+bool showAlt = input.bool(true, "Skenario positif dan negatif", group = gEng, active = ewOn and showPath,
+     tooltip = "Selain jalur skenario utama, digambar jalur skenario berlawanan arah: bila hitungan batal, harga bergerak zigzag melewati level invalidasi sejauh 0.618 kaki pertama skenario utama (bear case paling dalam setengah harga invalidasi). Titik akhir tiap jalur diberi tanda Bull case atau Bear case, jalur dimulai dari candle terakhir, dan target yang sudah tercapai disembunyikan. Skenario yang memproyeksikan harga nol atau negatif tidak digambar. Jalur naik (positif) memakai warna naik, jalur turun (negatif) memakai warna turun. Skenario utama bergaris putus-putus, skenario alternatif bergaris titik-titik.")
+string altScope = input.string("Derajat sinyal", "Skenario alternatif pada", options = ["Derajat sinyal", "Semua derajat"], group = gEng, active = ewOn and showPath and showAlt,
+     tooltip = "Derajat sinyal: jalur alternatif digambar pada satu derajat saja, yaitu derajat sinyal (grup 06). Bila derajat itu tidak punya hitungan atau proyeksinya mati, dipakai derajat Major, timeframe besar 1, timeframe besar 2, lalu Minor. Semua derajat: setiap derajat yang proyeksinya aktif mendapat jalur alternatif. Setelah hitungan utama batal, jalur alternatif tetap tampil sampai pivot berikutnya terkonfirmasi.")
+bool showCand = input.bool(true, "Hitungan kandidat bila belum ada hitungan valid", group = gEng, active = ewOn,
+     tooltip = "Bila swing terakhir belum memenuhi aturan hitungan mana pun (sering terjadi di timeframe mingguan dan bulanan karena jumlah pivot sedikit), swing terakhir diperlakukan sebagai kandidat gelombang 1 atau 1-2, lengkap dengan proyeksi dan level invalidasi. Kandidat tidak memicu sinyal, tidak dipakai filter timeframe besar, dan tidak menambah kualitas OB.")
+bool autoLen = input.bool(true, "Sesuaikan panjang pivot di timeframe mingguan dan bulanan", group = gEng, active = ewOn,
+     tooltip = "Pada timeframe 1W ke atas, panjang pivot dikalikan 0.6, dan pada 1M ke atas dikalikan 0.4 (minimal 2). Tanpa ini, puncak atau dasar di chart bulanan baru terkonfirmasi setelah 13 bulan.")
+int swingLook = input.int(30, "Jumlah pivot untuk hitungan swing", minval = 6, maxval = 150, group = gEng, active = ewOn,
+     tooltip = "Hitungan swing dimulai dari titik tertinggi atau terendah terakhir di dalam rentang pivot ini.")
+
+string gD1 = "02 - Elliott Wave: derajat Minor (timeframe chart)"
+bool en1 = input.bool(true, "Aktif", group = gD1, active = ewOn)
+bool show1 = input.bool(true, "Gambar gelombang", group = gD1, active = ewOn and en1)
+bool proj1 = input.bool(false, "Proyeksi", group = gD1, active = ewOn and en1)
+int len1 = input.int(5, "Panjang pivot", minval = 2, maxval = 50, group = gD1, active = ewOn and en1)
+color col1 = input.color(#26a69a, "Warna", group = gD1, active = ewOn and en1)
+
+string gD2 = "03 - Elliott Wave: derajat Major (timeframe chart)"
+bool en2 = input.bool(true, "Aktif", group = gD2, active = ewOn)
+bool show2 = input.bool(true, "Gambar gelombang", group = gD2, active = ewOn and en2)
+bool proj2 = input.bool(true, "Proyeksi", group = gD2, active = ewOn and en2)
+int len2 = input.int(13, "Panjang pivot", minval = 2, maxval = 100, group = gD2, active = ewOn and en2)
+color col2 = input.color(#2962ff, "Warna", group = gD2, active = ewOn and en2)
+
+// The higher timeframes also feed the S/R and OB / S&D zones, so their switch and
+// timeframe stay editable while Elliott Wave is off.
+string gD3 = "04 - Elliott Wave: timeframe besar 1"
+bool en3 = input.bool(true, "Aktif", group = gD3)
+bool show3 = input.bool(true, "Gambar gelombang", group = gD3, active = ewOn and en3)
+bool proj3 = input.bool(true, "Proyeksi", group = gD3, active = ewOn and en3)
+string tfMode3 = input.string("Auto", "Timeframe", options = ["Auto", "Manual"], group = gD3, inline = "tf3", active = en3,
+     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe chart. Data timeframe besar hanya memakai bar yang sudah ditutup, sehingga hitungan tidak repaint. Timeframe ini juga dipakai zona support dan resistance serta OB dan S&D timeframe besar 1.")
+string tfMan3 = input.timeframe("240", "", group = gD3, inline = "tf3", active = en3)
+int len3 = input.int(5, "Panjang pivot", minval = 2, maxval = 50, group = gD3, active = ewOn and en3)
+color col3 = input.color(#ab47bc, "Warna", group = gD3, active = ewOn and en3)
+
+string gD4 = "05 - Elliott Wave: timeframe besar 2"
+bool en4 = input.bool(true, "Aktif", group = gD4)
+bool show4 = input.bool(false, "Gambar gelombang", group = gD4, active = ewOn and en4)
+bool proj4 = input.bool(false, "Proyeksi", group = gD4, active = ewOn and en4)
+string tfMode4 = input.string("Auto", "Timeframe", options = ["Auto", "Manual"], group = gD4, inline = "tf4", active = en4,
+     tooltip = "Auto memilih timeframe standar pertama yang minimal 4 kali timeframe besar 1. Timeframe ini juga dipakai zona support dan resistance serta OB dan S&D timeframe besar 2.")
+string tfMan4 = input.timeframe("D", "", group = gD4, inline = "tf4", active = en4)
+int len4 = input.int(5, "Panjang pivot", minval = 2, maxval = 50, group = gD4, active = ewOn and en4)
+color col4 = input.color(#ff9800, "Warna", group = gD4, active = ewOn and en4)
+
+string gSig = "06 - Elliott Wave: sinyal, zona reaksi, dan peringatan"
+bool showW3 = input.bool(true, "Sinyal breakout gelombang 3", group = gSig, active = ewOn,
+     tooltip = "BELI atau JUAL saat candle ditutup melewati ujung gelombang 1 setelah gelombang 2 yang valid. Stop: ujung gelombang 2. Target: gelombang 3 di 1.618 kali gelombang 1.")
+bool showCSig = input.bool(true, "Sinyal koreksi selesai", group = gSig, active = ewOn,
+     tooltip = "BELI atau JUAL saat koreksi (ABC, WXY, atau WXYXZ) yang berlawanan dengan impuls sebelumnya terkonfirmasi. Koreksi yang melewati awal impuls tidak dihitung. Stop: ujung koreksi. Target: awal koreksi.")
+bool showExh = input.bool(true, "Peringatan akhir gelombang 5", group = gSig, active = ewOn,
+     tooltip = "Menandai impuls selesai yang diakhiri divergensi momentum atau diagonal akhir (ending diagonal). Ini peringatan pembalikan, bukan sinyal entry.")
+string sigDeg = input.string("Major", "Derajat sinyal", options = ["Minor", "Major"], group = gSig, active = ewOn)
+string htfFilter = input.string("Tidak berlawanan", "Filter timeframe besar", options = ["Ketat", "Tidak berlawanan", "Mati"], group = gSig, active = ewOn,
+     tooltip = "Menjumlahkan bias timeframe besar yang aktif. Ketat: jumlahnya harus searah dengan sinyal. Tidak berlawanan: jumlahnya boleh netral. Mati: tanpa filter.")
+float minRR = input.float(1.5, "Rasio reward / risk minimum", minval = 0.0, step = 0.1, group = gSig, active = ewOn,
+     tooltip = "Rasio reward / risk adalah jarak dari harga penutupan candle sinyal ke target dibagi jaraknya ke stop. Sinyal gelombang 3 dan koreksi selesai dengan rasio di bawah nilai ini tidak ditampilkan. Pivot baru terkonfirmasi beberapa candle setelah terbentuk, sehingga saat sinyal muncul harga bisa sudah jauh dari stop. Isi 0 untuk mematikan filter.")
+int minGrade = input.int(1, "Kualitas sinyal minimum (0-3)", minval = 0, maxval = 3, group = gSig, active = ewOn,
+     tooltip = "Satu poin untuk tiap syarat yang terpenuhi: bias timeframe besar searah sinyal; resistansi terdekat (beli) atau support terdekat (jual) berjarak paling sedikit sejauh stop dan RSI belum jenuh (di bawah 70 untuk beli, di atas 30 untuk jual); skor pola minimal 60 (gelombang 2 untuk sinyal gelombang 3, koreksi untuk sinyal koreksi). Poin tertulis pada label sinyal, misalnya W3 BELI 2/3. Sinyal di bawah nilai minimum tidak ditampilkan dan tidak memicu kondisi alert sinyal beli atau jual.")
+bool showZone = input.bool(true, "Tampilkan zona reaksi (100-161.8%)", group = gSig, inline = "z", active = ewOn,
+     tooltip = "Area akhir koreksi: gelombang C, Y, atau Z sepanjang 100 sampai 161.8% dari gelombang A atau W. Reaksi harga lebih mungkin terjadi di area ini.")
+color colZone = input.color(#2196f3, "", group = gSig, inline = "z", active = ewOn and showZone)
+bool alertsOn = input.bool(true, "Kirim peringatan kejadian", group = gSig, active = ewOn,
+     tooltip = "Perlu alert dengan kondisi 'Any alert() function call'. Mengirim satu pesan per kejadian saat candle ditutup: impuls selesai, koreksi selesai, triangle selesai, breakout gelombang 3, target tercapai, dan invalidasi.")
+
+string gCyc = "06b - Elliott Wave: siklus waktu dan konfluensi target"
+bool cycOn = input.bool(true, "Tampilkan siklus waktu", group = gCyc, active = ewOn,
+     tooltip = "Garis vertikal di setiap batas siklus, dihitung dari tanggal jangkar dengan panjang siklus tetap. Bawaan 48 bulan dari Januari 2023 mengikuti siklus 4 tahun Bitcoin, sehingga batas berikutnya jatuh di Januari 2027. Batas berikutnya adalah perkiraan waktu dasar siklus, dan dasbor menampilkan sisa waktunya. Ini perkiraan waktu, bukan level harga. Sesuaikan tanggal jangkar untuk aset lain.")
+int cycAnchor = input.time(timestamp("01 Jan 2023 00:00 +0000"), "Tanggal jangkar (dasar siklus)", group = gCyc, active = ewOn and cycOn)
+int cycMonths = input.int(48, "Panjang siklus (bulan)", minval = 1, maxval = 240, group = gCyc, active = ewOn and cycOn)
+bool confOn = input.bool(true, "Tandai target yang berkonfluensi", group = gCyc, active = ewOn,
+     tooltip = "Level proyeksi Fibonacci yang berada di dalam atau dekat (dalam toleransi ini) zona support / resistansi atau level likuiditas BSL / SSL diberi tanda ★ beserta level tersebut, juga pada kolom target dasbor. Target yang ditunjuk dua metode berbeda lebih kuat daripada target satu metode. Hanya zona S/R dan likuiditas yang sedang tampil yang dipakai.")
+float confPct = input.float(1.0, "Toleransi konfluensi (% harga)", minval = 0.1, step = 0.1, group = gCyc, active = ewOn and confOn)
+
+string gMa = "07 - EMA / MA"
+bool showMa = input.bool(true, "Tampilkan moving average", group = gMa)
+string maType = input.string("EMA", "Jenis", options = ["EMA", "SMA"], group = gMa, active = showMa)
+int ma1Len = input.int(20, "Cepat", minval = 1, group = gMa, active = showMa)
+int ma2Len = input.int(50, "Tengah", minval = 1, group = gMa, active = showMa)
+int ma3Len = input.int(200, "Lambat", minval = 1, group = gMa, active = showMa)
+bool maFill = input.bool(true, "Arsir di antara MA cepat dan tengah", group = gMa, active = showMa)
+
+string gSr = "08 - Support dan resistance"
+bool showSr = input.bool(true, "Tampilkan zona support dan resistance", group = gSr,
+     tooltip = "Zona dibentuk dari pivot timeframe chart serta timeframe besar 1 dan 2. Pivot yang berdekatan (dalam lebar gabung dikali ATR timeframe tersebut) digabung menjadi satu zona, dan jumlah sentuhannya dihitung. Zona di atas harga menjadi resistansi, di bawah harga menjadi support.")
+int srLen = input.int(5, "Panjang pivot timeframe chart", minval = 2, maxval = 50, group = gSr, active = showSr)
+float srMerge = input.float(0.3, "Lebar gabung zona (x ATR)", minval = 0.05, step = 0.05, group = gSr, active = showSr)
+float srThick = input.float(0.08, "Tebal zona (x ATR)", minval = 0.01, step = 0.01, group = gSr, active = showSr)
+int srMinTouch = input.int(1, "Sentuhan minimum", minval = 1, group = gSr, active = showSr)
+int srEach = input.int(3, "Zona di atas dan di bawah harga", minval = 1, maxval = 8, group = gSr, active = showSr)
+float srMaxDist = input.float(20.0, "Sembunyikan zona lebih jauh dari (% dari harga)", minval = 1.0, step = 1.0, group = gSr, active = showSr)
+bool srUseHtf = input.bool(true, "Sertakan zona timeframe besar 1 dan 2", group = gSr, active = showSr)
+bool showSrBreakIn = input.bool(false, "Tandai S/R yang tertembus", group = gSr, active = showSr,
+     tooltip = "TEMBUS R: candle ditutup di atas tepi atas resistansi terdekat. TEMBUS S: candle ditutup di bawah tepi bawah support terdekat. Hanya candle dengan badan minimal 0.8 ATR yang searah penembusan yang ditandai.")
+color colSup = input.color(#26a69a, "Warna support", group = gSr, active = showSr)
+color colRes = input.color(#ef5350, "Warna resistansi", group = gSr, active = showSr)
+bool showSrBreak = showSr and showSrBreakIn
+
+string gPa = "09 - Price action"
+bool paOn = input.bool(true, "Aktifkan price action", group = gPa,
+     tooltip = "Bila tidak dicentang, penanda BOS / CHoCH, HH / HL / LH / LL, dan pola candle disembunyikan. Struktur pasar tetap dihitung untuk dasbor dan order block.")
+bool showStructureIn = input.bool(true, "Tampilkan BOS / CHoCH", group = gPa, active = paOn,
+     tooltip = "BOS: candle ditutup melewati swing terakhir searah struktur. CHoCH: penembusan pertama yang membalik arah struktur.")
+bool showSwingTagsIn = input.bool(false, "Tampilkan HH / HL / LH / LL", group = gPa, active = paOn)
+bool showStructure = paOn and showStructureIn
+bool showSwingTags = paOn and showSwingTagsIn
+
+string gLiq = "10 - Likuiditas"
+bool liqOn = input.bool(true, "Aktifkan likuiditas", group = gLiq)
+bool showLiqIn = input.bool(true, "Tampilkan likuiditas buy-side / sell-side (BSL / SSL)", group = gLiq, active = liqOn,
+     tooltip = "Swing high (BSL) dan swing low (SSL) terkonfirmasi yang belum tersentuh. Level dihapus setelah candle tertutup menyentuhnya. EQH / EQL: dua swing berurutan yang hampir sama tinggi. Ini referensi likuiditas berbasis harga, bukan data order book.")
+int maxLiq = input.int(10, "Jumlah level likuiditas", minval = 1, maxval = 40, group = gLiq, active = liqOn and showLiqIn)
+float eqAtr = input.float(0.1, "Toleransi equal high / low (x ATR)", minval = 0.0, step = 0.05, group = gLiq, active = liqOn and showLiqIn)
+bool showSweepIn = input.bool(true, "Tampilkan liquidity sweep", group = gLiq, active = liqOn,
+     tooltip = "Sumbu candle menembus swing terkonfirmasi terakhir lalu candle ditutup kembali di dalamnya. Panah tipis menghubungkan sumbu swing yang tersapu dengan candle penyapu, dan titik kecil menandai ujung sumbu penyapu. Ini indikasi stop run, bukan bukti manipulasi.")
+int maxSweep = input.int(20, "Jumlah sweep yang disimpan", minval = 1, maxval = 50, group = gLiq, active = liqOn and showSweepIn)
+color colSweepLow = input.color(#ff9800, "Warna sweep low", group = gLiq, active = liqOn and showSweepIn)
+color colSweepHigh = input.color(#fbc02d, "Warna sweep high", group = gLiq, active = liqOn and showSweepIn)
+bool showLiq = liqOn and showLiqIn
+bool showSweep = liqOn and showSweepIn
+
+string gOb = "11 - Order block"
+bool showOb = input.bool(true, "Tampilkan order block", group = gOb,
+     tooltip = "Setelah BOS atau CHoCH, dicari titik awal kaki yang menembus struktur (low terendah untuk OB naik, high tertinggi untuk OB turun), lalu candle berlawanan terakhir pada atau sebelum titik itu ditandai. Blok berakhir saat candle ditutup melewati tepi jauhnya.")
+float obDispAtr = input.float(1.0, "Jarak minimum penembusan dari blok (x ATR)", minval = 0.0, step = 0.1, group = gOb, active = showOb)
+float obMaxAtr = input.float(1.0, "Tinggi maksimum (x ATR)", minval = 0.1, step = 0.1, group = gOb, active = showOb,
+     tooltip = "Blok yang lebih tinggi dari ini dipersempit ke badan candle, lalu dipotong ke tinggi ini dari ujung kaki.")
+int obMinQuality = input.int(3, "Kualitas minimum yang ditampilkan (0-5)", minval = 0, maxval = 5, group = gOb, active = showOb,
+     tooltip = "Satu poin untuk masing-masing: penembusan minimal 2 ATR, kaki meninggalkan FVG, titik awal kaki menyapu swing sebelumnya, volume candle penembus minimal 1.5x rata-rata 20 bar, dan arah blok searah bias Elliott Wave timeframe di atasnya. Ini hitungan konfluensi, bukan tingkat kemenangan.")
+int obLookback = input.int(50, "Kedalaman pencarian (bar per timeframe)", minval = 10, maxval = 200, group = gOb, active = showOb)
+int maxOb = input.int(30, "Jumlah order block yang disimpan", minval = 1, maxval = 60, group = gOb, active = showOb)
+color colObBull = input.color(#aeea00, "OB naik", group = gOb, active = showOb)
+color colObBear = input.color(#e040fb, "OB turun", group = gOb, active = showOb)
+
+string gSd = "12 - Supply dan demand"
+bool showSd = input.bool(true, "Tampilkan supply dan demand", group = gSd,
+     tooltip = "Candle impuls besar yang meninggalkan sekelompok candle base kecil mengubah base itu menjadi demand (naik) atau supply (turun). Zona berakhir saat candle ditutup melewati tepi jauhnya.")
+float sdImpulseAtr = input.float(1.5, "Badan candle impuls minimum (x ATR)", minval = 0.5, step = 0.1, group = gSd, active = showSd)
+float sdBaseBody = input.float(0.5, "Badan candle base maksimum (x ATR)", minval = 0.05, step = 0.05, group = gSd, active = showSd)
+int sdBaseMax = input.int(3, "Jumlah candle base maksimum", minval = 1, maxval = 6, group = gSd, active = showSd)
+int maxSd = input.int(30, "Jumlah zona supply / demand yang disimpan", minval = 1, maxval = 60, group = gSd, active = showSd)
+color colDemand = input.color(#00e676, "Demand", group = gSd, active = showSd)
+color colSupply = input.color(#ff4081, "Supply", group = gSd, active = showSd)
+
+string gZone = "13 - Tampilan order block dan supply / demand"
+int paEach = input.int(2, "OB dan S&D yang tampil di atas dan di bawah harga (masing-masing)", minval = 1, maxval = 10, group = gZone, active = showOb or showSd,
+     tooltip = "Hanya zona aktif terdekat yang digambar. Zona tempat harga sedang berada selalu tampil.")
+float zoneMaxMitPct = input.float(50.0, "Sembunyikan OB dan S&D yang termitigasi lebih dari (%)", minval = 0.0, maxval = 100.0, step = 5.0, group = gZone, active = showOb or showSd)
+int zoneMaxReturns = input.int(2, "Sembunyikan OB dan S&D yang didatangi lebih dari (kali)", minval = 0, maxval = 20, group = gZone, active = showOb or showSd)
+bool keepInvalidZones = input.bool(false, "Pertahankan OB dan S&D yang sudah batal (abu-abu)", group = gZone, active = showOb or showSd)
+bool paChart = input.bool(true, "Timeframe OB / S&D: chart", group = gZone, active = showOb or showSd)
+bool paTf3 = input.bool(true, "Timeframe OB / S&D: TF besar 1", group = gZone, active = showOb or showSd)
+bool paTf4 = input.bool(false, "Timeframe OB / S&D: TF besar 2", group = gZone, active = showOb or showSd,
+     tooltip = "Zona timeframe besar muncul setelah candle timeframe tersebut ditutup.")
+
+string gFvg = "14 - Fair value gap (FVG)"
+bool showFvg = input.bool(true, "Tampilkan fair value gap (FVG)", group = gFvg,
+     tooltip = "Celah tiga candle: low candle ketiga di atas high candle pertama (FVG naik) atau kebalikannya. FVG dihapus setelah harga menutupnya penuh.")
+float fvgMinAtr = input.float(0.5, "Ukuran FVG minimum (x ATR)", minval = 0.0, step = 0.05, group = gFvg, active = showFvg)
+int maxFvg = input.int(10, "Jumlah FVG terbuka maksimum", minval = 1, maxval = 50, group = gFvg, active = showFvg)
+
+string gDash = "15 - Dasbor"
+bool showTable = input.bool(true, "Tampilkan dasbor", group = gDash)
+string tablePos = input.string("Kanan atas", "Posisi", options = ["Kiri atas", "Kanan atas", "Kiri bawah", "Kanan bawah"], group = gDash, active = showTable)
+string tableSize = input.string("Kecil", "Ukuran teks", options = ["Sangat kecil", "Kecil", "Normal"], group = gDash, active = showTable)
+
+string gGen = "16 - Umum (dipakai beberapa fitur)"
+int swingLen = input.int(5, "Panjang swing (bar tiap sisi)", minval = 2, maxval = 50, group = gGen,
+     tooltip = "Dipakai struktur pasar (BOS / CHoCH), likuiditas, dan order block.")
+color colUp = input.color(#089981, "Warna naik", group = gGen)
+color colDn = input.color(#f23645, "Warna turun", group = gGen)
+color colInv = input.color(#787b86, "Warna invalidasi", group = gGen)
+bool autoContrast = input.bool(true, "Teks kontras otomatis (mode gelap dan terang)", group = gGen,
+     tooltip = "Pada latar chart gelap, warna teks label dan dasbor dibuat lebih terang. Pada latar terang, warna teks dibuat lebih gelap.")
+
+// -- Helpers -------------------------------------------------------------
+int MAX_PIVOTS = 200
+// Drawings far to the right of the last candle are not reliable, so a longer path is compressed.
+int PATH_MAX_BARS = 400
+
+f_tfAtLeast(int sec) =>
+    sec <= 60 ? "1" : sec <= 300 ? "5" : sec <= 900 ? "15" : sec <= 3600 ? "60" : sec <= 14400 ? "240" :
+     sec <= 86400 ? "D" : sec <= 604800 ? "W" : sec <= 2678400 ? "M" : sec <= 8035200 ? "3M" : "12M"
+
+f_tfLabel(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s < 60 ? str.tostring(s) + "s" : s < 3600 ? str.tostring(math.round(s / 60)) + "m" : s < 86400 ? str.tostring(math.round(s / 3600)) + "H" :
+     s < 604800 ? str.tostring(math.round(s / 86400)) + "D" : s < 2419200 ? str.tostring(math.round(s / 604800)) + "W" :
+     str.tostring(math.round(s / 2628000)) + "M"
+
+f_fmt(float x) =>
+    na(x) ? "-" : str.tostring(x, format.mintick)
+
+f_ratio(float x) =>
+    na(x) ? "-" : str.tostring(x, "#.###")
+
+f_dirTxt(int d) =>
+    d == 1 ? "naik" : "turun"
+
+f_near(float x, float t) =>
+    math.abs(x - t) <= t * 0.05
+
+f_labelSize(int deg) =>
+    deg == 0 ? size.small : deg == 3 ? size.large : size.normal
+
+f_width(int deg) =>
+    deg == 0 ? 1 : deg == 3 ? 3 : 2
+
+// Background brightness decides whether text is lightened (dark chart) or darkened (light chart).
+bool isDark = (color.r(chart.bg_color) * 0.299 + color.g(chart.bg_color) * 0.587 + color.b(chart.bg_color) * 0.114) < 128
+
+f_mix(color c, color t, float k) =>
+    color.rgb(color.r(c) + (color.r(t) - color.r(c)) * k, color.g(c) + (color.g(t) - color.g(c)) * k, color.b(c) + (color.b(t) - color.b(c)) * k)
+
+f_txt(color c) =>
+    not autoContrast ? c : isDark ? f_mix(c, color.white, 0.45) : f_mix(c, color.black, 0.25)
+
+f_wrap(int deg, string core) =>
+    deg == 2 ? "(" + core + ")" : deg == 3 ? "[" + core + "]" : core
+
+f_letter(int deg, string s) =>
+    f_wrap(deg, deg == 0 ? str.lower(s) : s)
+
+// Minor: i ii iii iv v / a b c, Major: 1 2 3 4 5 / A B C,
+// higher timeframe 1: (1) ... / (A) ..., higher timeframe 2: [1] ... / [A] ...
+f_waveName(int deg, bool impulse, int i) =>
+    impulse ? f_wrap(deg, deg == 0 ? (i == 1 ? "i" : i == 2 ? "ii" : i == 3 ? "iii" : i == 4 ? "iv" : "v") : str.tostring(i)) :
+     f_letter(deg, i == 1 ? "A" : i == 2 ? "B" : "C")
+
+f_scaleLen(int len, int sec) =>
+    not autoLen ? len : sec >= 2419200 ? math.max(2, math.round(len * 0.4)) : sec >= 604800 ? math.max(2, math.round(len * 0.6)) : len
+
+f_lineAt(int x1, float y1, int x2, float y2, int x) =>
+    x2 == x1 ? y2 : y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+
+f_arr4(Pivot a, Pivot b, Pivot c, Pivot d) =>
+    array<Pivot> r = array.new<Pivot>()
+    r.push(a)
+    r.push(b)
+    r.push(c)
+    r.push(d)
+    r
+
+f_arr6(Pivot a, Pivot b, Pivot c, Pivot d, Pivot e, Pivot f) =>
+    array<Pivot> r = array.new<Pivot>()
+    r.push(a)
+    r.push(b)
+    r.push(c)
+    r.push(d)
+    r.push(e)
+    r.push(f)
+    r
+
+f_pos(string p) =>
+    switch p
+        "Kiri atas" => position.top_left
+        "Kiri bawah" => position.bottom_left
+        "Kanan bawah" => position.bottom_right
+        => position.top_right
+
+f_textSize(string s) =>
+    switch s
+        "Sangat kecil" => size.tiny
+        "Normal" => size.normal
+        => size.small
+
+// Higher timeframe pivots from closed bars only: the caller requests this with
+// lookahead on, so the [1] offset keeps every value fixed once it appears.
+// The closed bar's close, high and low drive the trigger, target and invalidation checks.
+htfData(int len, int oscLen) =>
+    float ph = ta.pivothigh(high, len, len)
+    float pl = ta.pivotlow(low, len, len)
+    float osc = ta.rsi(close, oscLen)
+    float a = ta.atr(14)
+    [ph[1], pl[1], time[len + 1], osc[len + 1], a[1], close[1], high[1], low[1]]
+
+// Elliott impulse rules plus guideline score (0 to 100).
+// Rules: wave 2 stays above the start of wave 1, wave 3 passes the end of wave 1,
+// wave 3 is not the shortest, wave 4 does not enter wave 1 (except a diagonal),
+// wave 5 passes the end of wave 3 (unless truncation is allowed).
+// A diagonal is a wedge (contracting or expanding legs) whose wave 4 overlaps wave 1;
+// without the overlap the same leg shape is a regular impulse (for example an extended wave 5).
+// prev is the pivot before p0 (na when there is none), used by the wave 1 break rule.
+// chDev: distance of the wave 5 end from the parallel of the 2-4 line through wave 3, as a
+// fraction of wave 5 (positive = throw-over past the channel, negative = short of it).
+f_impulse(Pivot p0, Pivot p1, Pivot p2, Pivot p3, Pivot p4, Pivot p5, Pivot prev) =>
+    int d = p1.price > p0.price ? 1 : -1
+    float a1 = (p1.price - p0.price) * d
+    float a2 = (p2.price - p0.price) * d
+    float a3 = (p3.price - p0.price) * d
+    float a4 = (p4.price - p0.price) * d
+    float a5 = (p5.price - p0.price) * d
+    float w1 = a1
+    float w2 = a1 - a2
+    float w3 = a3 - a2
+    float w4 = a3 - a4
+    float w5 = a5 - a4
+    bool legsOk = p0.dir == -d and w1 > 0 and w2 > 0 and w3 > 0 and w4 > 0 and w5 > 0
+    bool overlap = a4 <= a1
+    bool contracting = w3 < w1 and w5 < w3 and w4 < w2
+    bool expanding = w3 > w1 and w5 > w3 and w4 > w2
+    bool diag = legsOk and allowDiag and overlap and a4 > a2 and (contracting or expanding)
+    bool div = not na(p5.osc) and not na(p3.osc) and (p5.osc - p3.osc) * d < 0
+    bool bos = not needBos or na(prev) or (p1.price - prev.price) * d > 0
+    bool valid = legsOk and bos and a2 > 0 and a3 > a1 and not (w3 < w1 and w3 < w5) and (not overlap or diag) and (a5 > a3 or allowTrunc) and (not needDiv or div)
+    float r2 = legsOk ? w2 / w1 : na
+    float e3 = legsOk ? w3 / w1 : na
+    float r4 = legsOk ? w4 / w3 : na
+    float e5 = legsOk ? w5 / w1 : na
+    float i5 = legsOk ? w5 / w4 : na
+    float chDev = na
+    if legsOk and p4.time != p2.time
+        float ch = f_lineAt(p2.time, p2.price, p4.time, p4.price, p5.time) + (p3.price - f_lineAt(p2.time, p2.price, p4.time, p4.price, p3.time))
+        chDev := (p5.price - ch) * d / w5
+    float sc = 0.0
+    if valid
+        sc += r2 >= 0.47 and r2 <= 0.886 ? 18 : r2 >= 0.382 and r2 < 0.95 ? 11 : 5
+        sc += f_near(e3, 1.618) or f_near(e3, 2.0) or f_near(e3, 2.618) or f_near(e3, 3.236) ? 18 : e3 >= 1.5 ? 14 : e3 >= 1.0 ? 9 : 4
+        sc += r4 >= 0.13 and r4 <= 0.4 ? 13 : r4 <= 0.5 ? 8 : 2
+        bool w5Equal = e5 >= 0.9 and e5 <= 1.1
+        bool w5Fib = math.abs(w5 / a3 - 0.618) <= 0.062
+        bool w5Inv = i5 >= 1.2 and i5 <= 1.66
+        bool w5Ext = e5 >= 1.55 and e3 < 1.55
+        sc += w5Equal or w5Fib or w5Inv or w5Ext ? 13 : 5
+        sc += (r2 >= 0.5) != (r4 >= 0.5) ? 6 : 0
+        float t2 = p2.time - p1.time
+        float t4 = p4.time - p3.time
+        sc += math.max(t2, t4) >= 1.5 * math.min(t2, t4) ? 4 : 0
+        sc += w3 >= w1 and w3 >= w5 ? 10 : 0
+        sc += div ? 10 : 0
+        // EWF channelling: wave 5 usually ends near the parallel of the 2-4 line through wave 3, or throws over it slightly.
+        sc += not na(chDev) and chDev >= -0.15 and chDev <= 0.3 ? 8 : 0
+    [valid, diag, sc, r2, e3, r4, e5, i5, div, chDev]
+
+// Three-wave correction after an impulse. e = end of the impulse, impDir = impulse direction.
+// EWF ratios: zigzag B = 50-85.4% of A and C = 61.8/100/123.6% of A (C at 161.8% may be wave 3);
+// regular flat B ~ 90%; expanded flat B ~ 123.6% and C = 123.6-161.8%; running flat C = 61.8-100%.
+// Guideline score (0 to 100): B near the typical ratio of its type (30), C near a Fibonacci
+// multiple of A (30), C lasting 0.618-1.618 of A (20) and the depth against the impulse of
+// length impLen (20; na impLen, as for the legs of a combination, scores a neutral 10).
+f_correction(Pivot e, Pivot a, Pivot b, Pivot c, int impDir, float impLen) =>
+    float lenA = (e.price - a.price) * impDir
+    bool base = a.dir == -impDir and b.dir == impDir and c.dir == -impDir and lenA > 0
+    float rB = base ? (b.price - a.price) * impDir / lenA : na
+    float cC = base ? (b.price - c.price) * impDir / lenA : na
+    bool beyondA = (a.price - c.price) * impDir > 0
+    string typ = ""
+    if base and rB > 0 and cC > 0
+        if rB >= 0.382 and rB <= 0.886 and beyondA and cC >= 0.58 and cC < 1.618
+            typ := "Zigzag"
+        else if rB > 0.886 and rB <= 1.05 and cC >= 0.58 and cC <= 1.3
+            typ := "Flat"
+        else if rB > 1.05 and rB <= 1.45 and cC >= 1.2 and cC <= 1.7 and cC >= rB - 0.05
+            typ := "Flat melebar"
+        else if rB > 1.05 and rB <= 1.45 and cC >= 0.58 and cC <= 1.05 and cC < rB - 0.05
+            typ := "Flat berjalan"
+    float sc = 0.0
+    if typ != ""
+        bool bTypical = typ == "Zigzag" ? rB >= 0.5 and rB <= 0.618 : typ == "Flat" ? rB >= 0.9 and rB <= 1.0 : typ == "Flat melebar" ? f_near(rB, 1.236) : false
+        sc += bTypical ? 30 : 15
+        sc += f_near(cC, 1.0) or f_near(cC, 1.618) or f_near(cC, 0.618) or (typ == "Flat melebar" and f_near(cC, 1.236)) ? 30 : 15
+        float tA = a.time - e.time
+        float tC = c.time - b.time
+        sc += tA > 0 and tC / tA >= 0.618 and tC / tA <= 1.618 ? 20 : 5
+        float depth = impLen > 0 ? math.abs(e.price - c.price) / impLen : na
+        sc += na(depth) ? 10 : depth >= 0.382 and depth <= 0.618 ? 20 : depth >= 0.236 and depth <= 0.786 ? 10 : 0
+    [typ != "", typ, rB, cC, sc]
+
+// X and Y (or Z) of a combination against W. s = start of W.
+f_combo(Pivot s, Pivot wEnd, Pivot xEnd, Pivot yEnd, int impDir) =>
+    float lenW = (s.price - wEnd.price) * impDir
+    float rX = lenW > 0 ? (xEnd.price - wEnd.price) * impDir / lenW : na
+    float rY = lenW > 0 ? (xEnd.price - yEnd.price) * impDir / lenW : na
+    bool ok = lenW > 0 and rX >= 0.45 and rX <= 0.9 and rY >= 0.58 and rY < 1.618
+    [ok, rX, rY, lenW]
+
+// Five legs A to E from t0. Contracting (each leg shorter), ascending or descending
+// (one flat side) or expanding (each leg longer, at most 161.8% of the previous one).
+f_triangle(Pivot t0, Pivot t1, Pivot t2, Pivot t3, Pivot t4, Pivot t5) =>
+    int d = t1.price > t0.price ? 1 : -1
+    float l1 = (t1.price - t0.price) * d
+    float l2 = (t1.price - t2.price) * d
+    float l3 = (t3.price - t2.price) * d
+    float l4 = (t3.price - t4.price) * d
+    float l5 = (t5.price - t4.price) * d
+    bool pos = t0.dir == -d and l1 > 0 and l2 > 0 and l3 > 0 and l4 > 0 and l5 > 0
+    bool contracting = pos and l2 < l1 and l3 < l2 and l4 < l3 and l5 < l4 and l2 / l1 >= 0.3 and l3 / l2 >= 0.3 and l4 / l3 >= 0.3 and l5 / l4 >= 0.3
+    bool expanding = pos and l2 > l1 and l3 > l2 and l4 > l3 and l5 > l4 and l2 / l1 <= 1.618 and l3 / l2 <= 1.618 and l4 / l3 <= 1.618 and l5 / l4 <= 1.618
+    float tol = l1 * 0.1
+    bool flatAC = math.abs(t3.price - t1.price) <= tol
+    bool flatBD = math.abs(t4.price - t2.price) <= tol
+    bool flatTop = d == 1 ? flatAC : flatBD
+    bool flatBottom = d == 1 ? flatBD : flatAC
+    string typ = expanding ? "melebar" : not contracting ? "" : flatTop and not flatBottom ? "naik" : flatBottom and not flatTop ? "turun" : "menyempit"
+    [contracting or expanding, typ, d, expanding ? l5 : l1]
+
+f_dev12(Pivot p0, Pivot p1, Pivot p2, Pivot prev) =>
+    int d = p1.price > p0.price ? 1 : -1
+    float w1 = (p1.price - p0.price) * d
+    float w2 = (p1.price - p2.price) * d
+    float r2 = w1 > 0 ? w2 / w1 : na
+    bool bos = not needBos or na(prev) or (p1.price - prev.price) * d > 0
+    bool ok = p0.dir == -d and w1 > 0 and w2 > 0 and r2 >= 0.236 and r2 < 1.0 and bos
+    [ok, d, w1, r2]
+
+f_dev123(Pivot p0, Pivot p1, Pivot p2, Pivot p3, Pivot prev) =>
+    int d = p1.price > p0.price ? 1 : -1
+    float w1 = (p1.price - p0.price) * d
+    float w2 = (p1.price - p2.price) * d
+    float w3 = (p3.price - p2.price) * d
+    bool bos = not needBos or na(prev) or (p1.price - prev.price) * d > 0
+    // Rules allow a wave 3 shorter than wave 1, but EWF expects at least 161.8%; a shorter one is too weak to project from.
+    bool ok = p0.dir == -d and w1 > 0 and w2 > 0 and w2 < w1 and w2 / w1 >= 0.236 and w3 >= w1 and (p3.price - p1.price) * d > 0 and bos
+    [ok, d, w1, w3, ok ? w2 / w1 : na, ok ? w3 / w1 : na]
+
+f_dev1234(Pivot p0, Pivot p1, Pivot p2, Pivot p3, Pivot p4, Pivot prev) =>
+    [ok3, d, w1, w3, r2, e3] = f_dev123(p0, p1, p2, p3, prev)
+    float w4 = (p3.price - p4.price) * d
+    bool ok = ok3 and w4 > 0 and w4 < w3 and (p4.price - p1.price) * d > 0
+    [ok, d, w1, w3, r2, ok ? w4 / w3 : na]
+
+// -- Confluence helpers (support / resistance, liquidity) ----------------
+f_addZone(array<Zone> zones, float p, float tol, int t, string tf) =>
+    int idx = -1
+    float best = tol
+    int n = zones.size()
+    if n > 0
+        for i = 0 to n - 1
+            float d = math.abs(zones.get(i).price - p)
+            if d <= best
+                best := d
+                idx := i
+    if idx >= 0
+        Zone z = zones.get(idx)
+        z.price := (z.price * z.touches + p) / (z.touches + 1)
+        z.touches += 1
+    else
+        zones.push(Zone.new(p, 1, t, close >= p ? 1 : -1, tf))
+        if zones.size() > 8
+            zones.shift()
+    idx
+
+f_feedZones(array<Zone> zones, float ph, float pl, float a, int t, string tf) =>
+    if not na(a)
+        if not na(ph)
+            f_addZone(zones, ph, a * srMerge, t, tf)
+        if not na(pl)
+            f_addZone(zones, pl, a * srMerge, t, tf)
+    true
+
+f_roles(array<Zone> zones, float half) =>
+    if not na(half)
+        for z in zones
+            if close > z.price + half
+                z.role := 1
+            else if close < z.price - half
+                z.role := -1
+    true
+
+f_nearest(array<Zone> zones, float half, float res0, float sup0, float rh0, float sh0) =>
+    float res = res0
+    float sup = sup0
+    float rh = rh0
+    float sh = sh0
+    for z in zones
+        if z.touches >= srMinTouch
+            if z.role == -1 and (na(res) or math.abs(z.price - close) < math.abs(res - close))
+                res := z.price
+                rh := half
+            if z.role == 1 and (na(sup) or math.abs(z.price - close) < math.abs(sup - close))
+                sup := z.price
+                sh := half
+    [res, sup, rh, sh]
+
+// Larger timeframes are collected first; a smaller-timeframe zone overlapping one is skipped.
+f_collect(array<SrCand> out, array<Zone> zones, float half) =>
+    if not na(half)
+        for z in zones
+            if z.touches >= srMinTouch and math.abs(z.price - close) / close * 100 <= srMaxDist
+                bool dup = false
+                for c in out
+                    if math.abs(c.price - z.price) <= c.half + half
+                        dup := true
+                if not dup
+                    out.push(SrCand.new(z.price, half, z.role, z.tf + " " + str.tostring(z.touches) + "x", z.bornTime))
+    true
+
+f_liqText(LiqLevel lv) =>
+    lv.buySide ? (lv.equalLevel ? "BSL / EQH" : "BSL") : (lv.equalLevel ? "SSL / EQL" : "SSL")
+
+// -- Order block, supply / demand and FVG helpers (ported from QAE v3) -----
+// Mitigation depth: how far price has traded into a zone from its near edge, as a
+// fraction of the zone height (0 = touched the near edge, 1 = reached the far edge).
+// fromTop is true for zones below price (demand, bullish OB, bullish FVG).
+penetration(float top, float bottom, bool fromTop) =>
+    float h = top - bottom
+    h > 0 ? math.max(0.0, math.min(1.0, fromTop ? (top - low) / h : (high - bottom) / h)) : 1.0
+
+mitigationText(float depth) =>
+    na(depth) ? "belum dimitigasi" : "dimitigasi " + str.tostring(math.round(depth * 100)) + "%"
+
+updatePaZones(array<PaZone> zones) =>
+    int n = zones.size()
+    if n > 0
+        for i = n - 1 to 0
+            PaZone z = zones.get(i)
+            if z.active and low <= z.b.get_top() and high >= z.b.get_bottom()
+                if na(z.lastTouch) or z.lastTouch < bar_index - 1
+                    z.touches += 1
+                z.lastTouch := bar_index
+                z.depth := math.max(nz(z.depth), penetration(z.b.get_top(), z.b.get_bottom(), z.dir == 1))
+            if z.active and (z.dir == 1 ? close < z.b.get_bottom() : close > z.b.get_top())
+                z.active := false
+                if keepInvalidZones
+                    z.b.set_left(z.leftTime)
+                    z.b.set_right(time)
+                    z.b.set_extend(extend.none)
+                    z.b.set_bgcolor(color.new(colInv, 94))
+                    z.b.set_border_color(color.new(colInv, 75))
+                    z.b.set_text("")
+                else
+                    z.b.delete()
+                    zones.remove(i)
+    true
+
+zoneEligible(PaZone z, int minQ) =>
+    z.active and not (z.quality >= 0 and z.quality < minQ) and nz(z.depth) * 100 <= zoneMaxMitPct and z.touches <= zoneMaxReturns
+
+// A hidden zone is parked as a zero-width box on the first chart bar, out of the
+// autoscale range; its price range stays in the box.
+placePaZone(PaZone z, bool show, int parkTime) =>
+    if show
+        z.b.set_left(z.leftTime)
+        z.b.set_right(time)
+        z.b.set_extend(extend.right)
+    else
+        z.b.set_bgcolor(color.new(z.c, 100))
+        z.b.set_border_color(color.new(z.c, 100))
+        z.b.set_extend(extend.none)
+        z.b.set_left(parkTime)
+        z.b.set_right(parkTime)
+        z.b.set_text("")
+    true
+
+// Shows the k eligible zones nearest to price on each side and hides the rest.
+// An eligible zone price is inside always shows. Returns a visibility flag per zone.
+showNearestZones(array<PaZone> zones, int k, int minQ) =>
+    array<bool> visible = array.new<bool>()
+    for z in zones
+        bool show = false
+        if z.active and not zoneEligible(z, minQ)
+            z.b.set_bgcolor(color.new(z.c, 100))
+            z.b.set_border_color(color.new(z.c, 100))
+        else if z.active
+            float top = z.b.get_top()
+            float bottom = z.b.get_bottom()
+            if close >= bottom and close <= top
+                show := true
+            else
+                bool above = bottom > close
+                float d = above ? bottom - close : close - top
+                int closer = 0
+                for o in zones
+                    if zoneEligible(o, minQ)
+                        float oTop = o.b.get_top()
+                        float oBottom = o.b.get_bottom()
+                        bool oInside = close >= oBottom and close <= oTop
+                        if not oInside and (oBottom > close) == above and (above ? oBottom - close : close - oTop) < d
+                            closer += 1
+                show := closer < k
+            z.b.set_bgcolor(color.new(z.c, show ? z.bgT : 100))
+            z.b.set_border_color(color.new(z.c, show ? 20 : 100))
+        visible.push(show)
+    visible
+
+// Overlap is checked within one timeframe only, so a higher-timeframe zone
+// is still drawn over a chart-timeframe zone at the same price.
+overlapsActive(array<PaZone> zones, int dir, float top, float bottom, int rank) =>
+    bool hit = false
+    for z in zones
+        if z.active and z.rank == rank and z.dir == dir and top >= z.b.get_bottom() and bottom <= z.b.get_top()
+            hit := true
+    hit
+
+zoneCaption(PaZone z) =>
+    z.txt + (z.quality >= 0 ? " | Q" + str.tostring(z.quality) + "/5" : "") + " | " + mitigationText(z.depth) + (z.touches > 0 ? " | " + str.tostring(z.touches) + "x" : "")
+
+pushPaZone(array<PaZone> zones, int leftTime, float top, float bottom, int dir, color base, string style, int bw, int bgT, string txt, int rank, int maxN) =>
+    zones.push(PaZone.new(box.new(leftTime, top, time, bottom, xloc = xloc.bar_time, extend = extend.right, border_color = color.new(base, 20),
+         border_width = bw, border_style = style, bgcolor = color.new(base, bgT)), dir, true, txt, base, rank, bgT = bgT, leftTime = leftTime, bornBar = bar_index))
+    while zones.size() > maxN
+        zones.shift().b.delete()
+    true
+
+// Scans the bars of the timeframe it runs on for a new order block and a new
+// supply or demand zone. Recent bars are kept in arrays, so the search needs
+// no dynamic history reference and also works inside request.security().
+// Returns direction (0 = none), top, bottom and start time of each zone.
+paScan(simple int swLen, simple int depth, simple float impMult, simple float baseMult, simple int baseMax, simple int aLen, simple float dispMult, simple float maxMult) =>
+    var array<float> hOpen = array.new<float>()
+    var array<float> hHigh = array.new<float>()
+    var array<float> hLow = array.new<float>()
+    var array<float> hClose = array.new<float>()
+    var array<int> hTime = array.new<int>()
+    var float swHigh = na
+    var float swLow = na
+    var int swHighBar = na
+    var int swLowBar = na
+    var bool highBroken = false
+    var bool lowBroken = false
+    var float prevSwHigh = na
+    var float prevSwLow = na
+    float a = ta.atr(aLen)
+    // Average of the 20 bars before this one, so the candle is compared with its past.
+    float volAvg = ta.sma(volume, 20)[1]
+    float ph = ta.pivothigh(high, swLen, swLen)
+    float pl = ta.pivotlow(low, swLen, swLen)
+    if not na(ph)
+        prevSwHigh := swHigh
+        swHigh := ph
+        swHighBar := bar_index - swLen
+        highBroken := false
+    if not na(pl)
+        prevSwLow := swLow
+        swLow := pl
+        swLowBar := bar_index - swLen
+        lowBroken := false
+    int n = hClose.size()
+    int obDir = 0
+    float obTop = na
+    float obBottom = na
+    int obTime = na
+    int obFlags = 0
+    bool upBreak = not na(swHigh) and not highBroken and close > swHigh
+    bool downBreak = not na(swLow) and not lowBroken and close < swLow
+    if upBreak or downBreak
+        // The leg that broke structure starts at its extreme: the lowest low (bullish)
+        // or highest high (bearish) between the broken swing and the breaking candle.
+        bool up = upBreak
+        int span = math.min(bar_index - (up ? swHighBar : swLowBar), n)
+        float extreme = na
+        int origin = -1
+        if span >= 1
+            for i = 1 to span
+                int k = n - i
+                float px = up ? hLow.get(k) : hHigh.get(k)
+                if na(extreme) or (up ? px < extreme : px > extreme)
+                    extreme := px
+                    origin := k
+        if origin >= 0
+            // Order block: the last opposite candle at or before the origin, or the origin candle itself.
+            int pick = origin
+            for k = origin to n - span
+                if up ? hClose.get(k) < hOpen.get(k) : hClose.get(k) > hOpen.get(k)
+                    pick := k
+                    break
+            float top = up ? hHigh.get(pick) : extreme
+            float bottom = up ? extreme : hLow.get(pick)
+            // A wide candle makes the block too tall to use: reduce it to the candle body,
+            // then cap it at maxMult x ATR from the leg extreme.
+            if top - bottom > a * maxMult
+                if up
+                    top := math.max(bottom, math.max(hOpen.get(pick), hClose.get(pick)))
+                else
+                    bottom := math.min(top, math.min(hOpen.get(pick), hClose.get(pick)))
+            if top - bottom > a * maxMult
+                if up
+                    top := bottom + a * maxMult
+                else
+                    bottom := top - a * maxMult
+            bool displaced = up ? close - top >= a * dispMult : bottom - close >= a * dispMult
+            if displaced and top > bottom
+                obDir := up ? 1 : -1
+                obTop := top
+                obBottom := bottom
+                obTime := hTime.get(pick)
+                bool strong = up ? close - top >= a * math.max(2.0, dispMult * 2) : bottom - close >= a * math.max(2.0, dispMult * 2)
+                bool gap = n >= 2 and (up ? low > hHigh.get(n - 2) : high < hLow.get(n - 2))
+                if not gap and n - pick >= 3
+                    for j = pick + 2 to n - 1
+                        if up ? hLow.get(j) > hHigh.get(j - 2) : hHigh.get(j) < hLow.get(j - 2)
+                            gap := true
+                            break
+                // Liquidity grab: the origin took out the last swing formed before it.
+                int originBar = bar_index - (n - origin)
+                float swept = up ? (swLowBar < originBar ? swLow : prevSwLow) : (swHighBar < originBar ? swHigh : prevSwHigh)
+                bool grab = not na(swept) and (up ? extreme < swept : extreme > swept)
+                bool volSpike = not na(volAvg) and volAvg > 0 and volume >= volAvg * 1.5
+                obFlags := (strong ? 1 : 0) + (gap ? 2 : 0) + (grab ? 4 : 0) + (volSpike ? 8 : 0)
+        if upBreak
+            highBroken := true
+        if downBreak
+            lowBroken := true
+    int sdDir = 0
+    float sdTop = na
+    float sdBottom = na
+    int sdTime = na
+    float atrPrev = a[1]
+    // Impulse candle: body at least impMult x ATR and at least half of its range.
+    // Base candle: body at most baseMult x ATR and at most half of its own range.
+    float bodyNow = math.abs(close - open)
+    if not na(atrPrev) and n > 0 and bodyNow >= atrPrev * impMult and bodyNow >= (high - low) * 0.5
+        int baseCount = 0
+        bool scanning = true
+        float baseHigh = na
+        float baseLow = na
+        float bodyHigh = na
+        float bodyLow = na
+        for i = 1 to math.min(baseMax, n)
+            int k = n - i
+            float o = hOpen.get(k)
+            float c = hClose.get(k)
+            if scanning and math.abs(c - o) <= atrPrev * baseMult and math.abs(c - o) <= (hHigh.get(k) - hLow.get(k)) * 0.5
+                baseCount += 1
+                baseHigh := na(baseHigh) ? hHigh.get(k) : math.max(baseHigh, hHigh.get(k))
+                baseLow := na(baseLow) ? hLow.get(k) : math.min(baseLow, hLow.get(k))
+                bodyHigh := na(bodyHigh) ? math.max(o, c) : math.max(bodyHigh, o, c)
+                bodyLow := na(bodyLow) ? math.min(o, c) : math.min(bodyLow, o, c)
+            else
+                scanning := false
+        int d = close > open ? 1 : -1
+        if baseCount > 0 and (d == 1 ? close > baseHigh : close < baseLow)
+            float top = d == 1 ? bodyHigh : baseHigh
+            float bottom = d == 1 ? baseLow : bodyLow
+            if top > bottom
+                sdDir := d
+                sdTop := top
+                sdBottom := bottom
+                sdTime := hTime.get(n - baseCount)
+    hOpen.push(open)
+    hHigh.push(high)
+    hLow.push(low)
+    hClose.push(close)
+    hTime.push(time)
+    if hClose.size() > depth
+        hOpen.shift()
+        hHigh.shift()
+        hLow.shift()
+        hClose.shift()
+        hTime.shift()
+    [obDir, obTop, obBottom, obTime, obFlags, sdDir, sdTop, sdBottom, sdTime]
+
+// Same scan shifted by one bar. Fetched with lookahead on, only closed
+// higher-timeframe bars reach the chart (no repaint).
+paScanClosed(simple int swLen, simple int depth, simple float impMult, simple float baseMult, simple int baseMax, simple int aLen, simple float dispMult, simple float maxMult) =>
+    [od, ot, ob, otm, of, sd, st, sb, stm] = paScan(swLen, depth, impMult, baseMult, baseMax, aLen, dispMult, maxMult)
+    [od[1], ot[1], ob[1], otm[1], of[1], sd[1], st[1], sb[1], stm[1]]
+
+// Everything one higher timeframe supplies, fetched in a single request.security() call.
+htfAll(int len, int oscLen, simple int swLen, simple int depth, simple float impMult, simple float baseMult, simple int baseMax, simple int aLen, simple float dispMult, simple float maxMult) =>
+    [ph, pl, t, o, a, c, h, l] = htfData(len, oscLen)
+    [od, ot, ob, otm, of, sd, st, sb, stm] = paScanClosed(swLen, depth, impMult, baseMult, baseMax, aLen, dispMult, maxMult)
+    [ph, pl, t, o, a, c, h, l, od, ot, ob, otm, of, sd, st, sb, stm]
+
+// Chart time of the highest high and the lowest low inside each recent bar of tf,
+// so higher timeframe waves are drawn on the candle that made the extreme.
+// Must run on every chart bar; keep is the number of higher timeframe bars remembered.
+extremeTimes(string tf, int keep) =>
+    var array<int> keys = array.new<int>()
+    var array<float> his = array.new<float>()
+    var array<int> hiTimes = array.new<int>()
+    var array<float> los = array.new<float>()
+    var array<int> loTimes = array.new<int>()
+    int key = time(tf)
+    int n = keys.size()
+    if n == 0 or keys.get(n - 1) != key
+        keys.push(key)
+        his.push(high)
+        hiTimes.push(time)
+        los.push(low)
+        loTimes.push(time)
+        if keys.size() > keep
+            keys.shift()
+            his.shift()
+            hiTimes.shift()
+            los.shift()
+            loTimes.shift()
+    else
+        if high > his.get(n - 1)
+            his.set(n - 1, high)
+            hiTimes.set(n - 1, time)
+        if low < los.get(n - 1)
+            los.set(n - 1, low)
+            loTimes.set(n - 1, time)
+    [keys, hiTimes, loTimes]
+
+// Chart time stored for the higher timeframe bar that opened at key; key itself when unknown.
+f_extremeTime(array<int> keys, array<int> times, int key) =>
+    int res = key
+    int n = keys.size()
+    if n > 0 and not na(key)
+        for i = n - 1 to 0
+            if keys.get(i) == key
+                res := times.get(i)
+                break
+    res
+
+// -- Timeframes ----------------------------------------------------------
+int chartSec = timeframe.in_seconds()
+int barMs = chartSec * 1000
+// From the weekly chart up a 3x step keeps the ladder at M and 3M instead of jumping to 12M.
+string tf3 = tfMode3 == "Auto" ? f_tfAtLeast(chartSec * (chartSec >= 604800 ? 3 : 4)) : tfMan3
+int tf3Sec = timeframe.in_seconds(tf3)
+string tf4 = tfMode4 == "Auto" ? f_tfAtLeast(tf3Sec * (tf3Sec >= 604800 ? 3 : 4)) : tfMan4
+bool act3 = en3 and tf3Sec > chartSec
+bool act4 = en4 and timeframe.in_seconds(tf4) > chartSec and timeframe.in_seconds(tf4) > tf3Sec
+int pLen1 = f_scaleLen(len1, chartSec)
+int pLen2 = f_scaleLen(len2, chartSec)
+int pLen3 = f_scaleLen(len3, tf3Sec)
+int pLen4 = f_scaleLen(len4, timeframe.in_seconds(tf4))
+float atrV = ta.atr(14)
+
+// Base text of a wave label, rows listed from the pivot outwards: the name with its
+// price on the same line ("0  74512.3"), then the extra (ratio or score).
+f_waveBase(string name, string extra, float price) =>
+    string row = showWavePrice ? name + "  " + f_fmt(price) : name
+    extra == "" ? row : row + "\n" + extra
+
+// Display text: pad blank lines next to the pivot, then the base rows. dir 1 is a high
+// (text above the pivot, so the rows are reversed), -1 a low. Spacing with text lines
+// instead of a price offset keeps the label next to its pivot at any zoom and timeframe.
+f_waveRender(string base, int dir, int pad) =>
+    array<string> rows = array.new<string>()
+    if pad > 0
+        for i = 1 to pad
+            rows.push("")
+    for r in str.split(base, "\n")
+        rows.push(r)
+    if dir == 1
+        rows.reverse()
+    rows.join("\n")
+string dataTicker = ticker.standard(syminfo.tickerid)
+
+// -- Methods -------------------------------------------------------------
+method erase(Pattern this) =>
+    for ln in this.lines
+        ln.delete()
+    for lb in this.labels
+        lb.delete()
+    this.lines.clear()
+    this.labels.clear()
+    if not na(this.labDirs)
+        this.labDirs.clear()
+        this.labBase.clear()
+
+method clearProj(Layer this) =>
+    for ln in this.projLines
+        ln.delete()
+    for lb in this.projLabels
+        lb.delete()
+    for bx in this.projBoxes
+        bx.delete()
+    for g in this.path
+        g.ln.delete()
+        g.lb.delete()
+    this.projLines.clear()
+    this.projLabels.clear()
+    this.projBoxes.clear()
+    this.path.clear()
+    this.altStart := -1
+    for ln in this.devLines
+        ln.delete()
+    for lb in this.devLabels
+        lb.delete()
+    this.devLines.clear()
+    this.devLabels.clear()
+    this.devDirs.clear()
+    this.devBase.clear()
+    this.projTexts.clear()
+    this.projCols.clear()
+    this.leg0T0 := na
+    this.leg0P0 := na
+    this.leg0T1 := na
+    this.leg0Y := na
+
+method resetEvents(Layer this) =>
+    this.evImpulse := 0
+    this.evDiv := false
+    this.evEndDiag := false
+    this.evCorr := 0
+    this.evTri := false
+    this.evTrigger := 0
+    this.evInvalid := false
+    this.evTarget := false
+
+method at(Layer this, int k) =>
+    this.pivots.get(this.pivots.size() - 1 - k)
+
+// Pivots at(k0), at(k0 - 1), ... in time order.
+method pickRun(Layer this, int k0, int cnt) =>
+    array<Pivot> r = array.new<Pivot>()
+    for i = 0 to cnt - 1
+        r.push(this.at(k0 - i))
+    r
+
+method countAfter(Layer this, int t) =>
+    int c = 0
+    int n = this.pivots.size()
+    if n > 0
+        for i = n - 1 to 0
+            if this.pivots.get(i).time > t
+                c += 1
+            else
+                break
+    c
+
+method lastPattern(Layer this) =>
+    Pattern res = na
+    if this.patterns.size() > 0
+        res := this.patterns.last()
+    res
+
+method lastImpulseIdx(Layer this) =>
+    int res = -1
+    int n = this.patterns.size()
+    if n > 0
+        for i = n - 1 to 0
+            if this.patterns.get(i).kind == 1
+                res := i
+                break
+    res
+
+method lastImpulse(Layer this) =>
+    int i = this.lastImpulseIdx()
+    Pattern res = na
+    if i >= 0
+        res := this.patterns.get(i)
+    res
+
+// Hides or shows a stored pattern without deleting its drawings.
+method setShown(Pattern this, bool on, color c) =>
+    for ln in this.lines
+        ln.set_color(on ? c : color.new(c, 100))
+    for lb in this.labels
+        lb.set_textcolor(on ? f_txt(c) : color.new(c, 100))
+    this
+
+// Zigzag: pivots alternate high and low. A second pivot in the same direction
+// replaces the previous one only when it is more extreme.
+method addPivot(Layer this, float p, int t, int dir, float osc) =>
+    int ev = 0
+    if this.pivots.size() == 0
+        this.pivots.push(Pivot.new(p, t, dir, osc))
+        ev := 1
+    else
+        Pivot last = this.pivots.last()
+        if last.dir == dir
+            if (p - last.price) * dir > 0
+                this.replacedTime := last.time
+                last.price := p
+                last.time := t
+                last.osc := osc
+                ev := 2
+        else if (p - last.price) * dir > 0
+            this.pivots.push(Pivot.new(p, t, dir, osc))
+            if this.pivots.size() > MAX_PIVOTS
+                this.pivots.shift()
+            ev := 1
+    ev
+
+method feed(Layer this, float ph, float pl, int tH, int tL, float osc) =>
+    int lastDir = this.pivots.size() > 0 ? this.pivots.last().dir : 0
+    bool hasH = not na(ph)
+    bool hasL = not na(pl)
+    if hasH and hasL
+        if lastDir == 1
+            hasH := false
+        else
+            hasL := false
+    int ev = 0
+    if hasH
+        ev := this.addPivot(ph, tH, 1, osc)
+    if hasL
+        ev := this.addPivot(pl, tL, -1, osc)
+    ev
+
+// Swings since the latest extreme (highest high or lowest low) in the lookback.
+// EWF: 3, 7 and 11 swings form a corrective sequence; 5, 9 and 13 a motive one.
+method swingCount(Layer this) =>
+    int n = this.pivots.size()
+    string res = "-"
+    if n >= 3
+        int start = n - math.min(n, swingLook)
+        int iHi = start
+        int iLo = start
+        for i = start to n - 1
+            float pr = this.pivots.get(i).price
+            if pr > this.pivots.get(iHi).price
+                iHi := i
+            if pr < this.pivots.get(iLo).price
+                iLo := i
+        int anchor = math.max(iHi, iLo)
+        int sw = n - 1 - anchor
+        int d = anchor == iLo ? 1 : -1
+        string cls = sw == 3 or sw == 7 or sw == 11 or sw == 15 ? "korektif" : sw == 5 or sw == 9 or sw == 13 or sw == 17 ? "motif" : "berjalan"
+        float ap = this.pivots.get(anchor).price
+        res := str.tostring(sw) + " " + f_dirTxt(d) + " sejak " + (d == 1 ? "low " : "high ") + f_fmt(ap) + (sw == 0 ? "" : " (" + cls + ")")
+    res
+
+// Removes the oldest patterns beyond maxPatterns, except the last impulse: the
+// corrections, combinations and wave B triangles after it are measured from it.
+method trimPatterns(Layer this) =>
+    bool trimming = true
+    while trimming
+        int n = this.patterns.size()
+        int ki = this.lastImpulseIdx()
+        bool keepExtra = ki >= 0 and ki < n - maxPatterns
+        if n > maxPatterns + (keepExtra ? 1 : 0)
+            this.patterns.remove(ki == 0 ? 1 : 0).erase()
+        else
+            trimming := false
+    this
+
+// Moves the last pattern (a correction that a larger one replaces) to the shelf, hidden.
+method shelveLast(Layer this) =>
+    Pattern p = this.patterns.pop()
+    p.setShown(false, this.col)
+    this.shelf.push(p)
+    this
+
+method clearShelf(Layer this) =>
+    for p in this.shelf
+        p.erase()
+    this.shelf.clear()
+    this
+
+// Dotted levels are the secondary Fibonacci options; "Ringkas" detail leaves them out.
+method projLevel(Layer this, int x1, int x2, float y, string txt, color c, string st) =>
+    if this.live and (projDetail == "Lengkap" or st != line.style_dotted)
+        this.projLines.push(line.new(x1, y, x2, y, xloc = xloc.bar_time, color = c, style = st, width = 1))
+        string full = this.tag + " " + txt + "  " + f_fmt(y)
+        this.projLabels.push(label.new(x2, y, full, xloc = xloc.bar_time,
+             style = label.style_label_left, color = color.new(c, 100), textcolor = f_txt(c), size = size.small))
+        this.projTexts.push(full)
+        this.projCols.push(c)
+
+method projZone(Layer this, int x1, int x2, float y1, float y2, color c, string txt) =>
+    if this.live
+        this.projBoxes.push(box.new(x1, math.max(y1, y2), x2, math.min(y1, y2), xloc = xloc.bar_time,
+             border_color = color.new(c, 70), bgcolor = color.new(c, 88), text = this.tag + ": " + txt,
+             text_color = f_txt(c), text_size = size.small, text_halign = text.align_right, text_valign = this.deg % 2 == 0 ? text.align_top : text.align_bottom))
+
+method reactZone(Layer this, int x1, int x2, float y1, float y2) =>
+    if showZone and this.live
+        this.projBoxes.push(box.new(x1, math.max(y1, y2), x2, math.min(y1, y2), xloc = xloc.bar_time,
+             border_color = color.new(colZone, 40), bgcolor = color.new(colZone, 85), text = "Zona reaksi 100-161.8%",
+             text_color = f_txt(colZone), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top))
+    this
+
+method waveLabel(Layer this, Pattern pt, Pivot p, string name, string extra, string tip) =>
+    bool isHigh = p.dir == 1
+    string base = f_waveBase(name, extra, p.price)
+    if na(pt.labDirs)
+        pt.labDirs := array.new<int>()
+        pt.labBase := array.new<string>()
+    pt.labDirs.push(p.dir)
+    pt.labBase.push(base)
+    pt.labels.push(label.new(p.time, p.price, f_waveRender(base, p.dir, showSwingTags ? 1 : 0), xloc = xloc.bar_time,
+         style = isHigh ? label.style_label_down : label.style_label_up, color = color.new(this.col, 100),
+         textcolor = f_txt(this.col), size = f_labelSize(this.deg), tooltip = tip))
+
+// Draws a path through pts (labels on pts 1..n-1) and stores the pattern.
+// skipLeg leaves out one leg whose structure is drawn separately (a wave B triangle).
+method drawPath(Layer this, Pattern pt, array<Pivot> pts, array<string> names, array<string> extras, string tip, string st, int skipLeg) =>
+    if this.show
+        int w = f_width(this.deg)
+        for i = 1 to pts.size() - 1
+            Pivot a = pts.get(i - 1)
+            Pivot b = pts.get(i)
+            if i != skipLeg
+                pt.lines.push(line.new(a.time, a.price, b.time, b.price, xloc = xloc.bar_time, color = this.col, width = w, style = st))
+            // An empty name is a sub-wave pivot of an extension: the line follows it, unlabelled.
+            if names.get(i - 1) != ""
+                this.waveLabel(pt, b, names.get(i - 1), extras.get(i - 1), tip)
+    // Shelved corrections can only come back while the pattern that replaced them is the latest one.
+    if not pt.hasShelf
+        this.clearShelf()
+    this.patterns.push(pt)
+    this.trimPatterns()
+
+// Tests an impulse on six pivots; kStart is the at() index of the first one. For an
+// extension, all holds every pivot from the start (the path is drawn through all of them,
+// labels only on the six main ones) and ext is the extended wave; otherwise all is na.
+method tryImpulse(Layer this, array<Pivot> pts, int kStart, array<Pivot> all, int ext) =>
+    Pivot p0 = pts.get(0)
+    Pivot p5 = pts.get(5)
+    Pivot prev = kStart + 1 < this.pivots.size() ? this.at(kStart + 1) : na
+    [ok, diag, sc, r2, e3, r4, e5, i5, div, chDev] = f_impulse(p0, pts.get(1), pts.get(2), pts.get(3), pts.get(4), p5, prev)
+    bool res = false
+    if ok and sc >= minScore
+        int d = pts.get(1).price > p0.price ? 1 : -1
+        // A leading diagonal (wave 1 or A) starts from a new extreme. When an earlier pivot in the
+        // previous eight lies beyond its start, the trend was already running: ending diagonal (wave 5 or C).
+        bool ending = false
+        if diag
+            int jEnd = math.min(kStart + 8, this.pivots.size() - 1)
+            if jEnd > kStart
+                for j = kStart + 1 to jEnd
+                    Pivot q = this.at(j)
+                    if q.dir == p0.dir and (p0.price - q.price) * d > 0
+                        ending := true
+        string kindTxt = not diag ? "Impuls" : ending ? "Diagonal akhir (ending)" : "Diagonal awal (leading)"
+        float w2Ext = na
+        if ext == 5
+            w2Ext := all.get(6).price
+        Pattern pt = Pattern.new(1, d, p0.time, p5.time, p0.price, p5.price, sc, array.new<line>(), array.new<label>(), name = kindTxt, ext = ext, extW2 = w2Ext)
+        Pattern prevP = this.lastPattern()
+        if this.show and (na(prevP) or prevP.endTime != p0.time)
+            this.waveLabel(pt, p0, f_wrap(this.deg, "0"), "", "Awal " + str.lower(kindTxt) + " " + f_dirTxt(d) + ", " + this.name + " " + this.tfText)
+        string tip = kindTxt + " " + f_dirTxt(d) + ", " + this.name + " " + this.tfText +
+             "\nSkor: " + str.tostring(sc, "#") + " / 100" +
+             "\nRetracement gelombang 2: " + f_ratio(r2) +
+             "\nGelombang 3 / gelombang 1: " + f_ratio(e3) +
+             "\nRetracement gelombang 4: " + f_ratio(r4) +
+             "\nGelombang 5 / gelombang 1: " + f_ratio(e5) +
+             "\nGelombang 5 / gelombang 4: " + f_ratio(i5) +
+             "\nDivergensi momentum di gelombang 5: " + (div ? "ya" : "tidak") +
+             "\nJarak ujung gelombang 5 dari channel 2-4 (x gelombang 5): " + f_ratio(chDev) +
+             (ext != 0 ? "\nGelombang " + str.tostring(ext) + " memanjang (extension dengan 5 subgelombang)" : "") +
+             "\nFase motif selesai di gelombang 5, fase koreksi A-B-C diperkirakan."
+        array<Pivot> path = na(all) ? pts : all
+        array<string> names = array.new<string>()
+        array<string> extras = array.new<string>()
+        int m = 1
+        for j = 1 to path.size() - 1
+            if m <= 5 and path.get(j).time == pts.get(m).time
+                names.push(f_waveName(this.deg, true, m))
+                extras.push(m == 5 ? str.tostring(sc, "#") + "%" + (diag ? (ending ? " ED" : " LD") : "") + (ext != 0 ? " Ext W" + str.tostring(ext) : "") :
+                     not showRatios ? "" : m == 2 ? f_ratio(r2) : m == 3 ? f_ratio(e3) + "x" : m == 4 ? f_ratio(r4) : "")
+                m += 1
+            else
+                names.push("")
+                extras.push("")
+        this.drawPath(pt, path, names, extras, tip, line.style_solid, -1)
+        this.evImpulse := d
+        this.evDiv := div
+        this.evEndDiag := ending
+        this.score := sc
+        res := true
+    res
+
+// Triangle on pivots at(k0) .. at(k0 - 5).
+method drawTriangle(Layer this, int k0, int role, int trendDir, string typ, float wLen, bool hasShelf) =>
+    array<Pivot> pts = this.pickRun(k0, 6)
+    Pivot t0 = pts.get(0)
+    Pivot t5 = pts.get(5)
+    string nm = "Triangle " + typ
+    Pattern pt = Pattern.new(3, trendDir, t0.time, t5.time, t0.price, t5.price, na, array.new<line>(), array.new<label>(), role = role, name = nm, wLen = wLen, hasShelf = hasShelf)
+    if this.show
+        Pivot t1 = pts.get(1)
+        Pivot t2 = pts.get(2)
+        Pivot t3 = pts.get(3)
+        Pivot t4 = pts.get(4)
+        color bc = color.new(this.col, 40)
+        pt.lines.push(line.new(t1.time, t1.price, t5.time, f_lineAt(t1.time, t1.price, t3.time, t3.price, t5.time), xloc = xloc.bar_time, color = bc, style = line.style_dotted))
+        pt.lines.push(line.new(t2.time, t2.price, t5.time, f_lineAt(t2.time, t2.price, t4.time, t4.price, t5.time), xloc = xloc.bar_time, color = bc, style = line.style_dotted))
+    string tip = nm + (role == 4 ? " di gelombang 4" : " di gelombang B") + ", " + this.name + " " + this.tfText +
+         (role == 4 ? "\nDorongan gelombang 5 kira-kira sepanjang kaki terlebar: " : "\nPanjang gelombang A: ") + f_fmt(wLen)
+    array<string> names = array.from(f_letter(this.deg, "A"), f_letter(this.deg, "B"), f_letter(this.deg, "C"), f_letter(this.deg, "D"), f_letter(this.deg, "E"))
+    array<string> extras = array.from("", "", "", "", "")
+    this.drawPath(pt, pts, names, extras, tip, line.style_solid, -1)
+
+// Path point times are estimates. The visible path starts at the last candle, and a path
+// that would end beyond PATH_MAX_BARS is compressed to fit.
+// t0 is set on the first leg of each scenario and na on the others, so every scenario is
+// laid out on its own.
+method layoutPath(Layer this) =>
+    int n = this.path.size()
+    int s = 0
+    while s < n
+        int e = s + 1
+        while e < n and na(this.path.get(e).t0)
+            e += 1
+        // Leading legs whose target the current close has already reached are hidden.
+        int f = s
+        bool scanning = true
+        float prevY = this.path.get(s).y0
+        for k = s to e - 1
+            float yk = this.path.get(k).ln.get_y2()
+            if scanning and (close - yk) * (yk > prevY ? 1 : -1) >= 0
+                f := k + 1
+            else
+                scanning := false
+            prevY := yk
+        for k = s to e - 1
+            PathLeg g = this.path.get(k)
+            g.hide := k < f
+            g.ln.set_color(g.hide ? color.new(g.lc, 100) : g.lc)
+            g.lb.set_textcolor(g.hide ? color.new(g.tc, 100) : g.tc)
+        // The remaining legs start at the current candle and close, so no projected leg is
+        // drawn over candles that already printed.
+        // Each leg keeps its own estimated duration. The first visible leg now starts at the
+        // close, so it keeps the share of its time that matches the price still to cover
+        // (0.25 to 1.5 of it). Shifting the whole path by the overdue time used to squeeze
+        // that leg into two bars and draw it almost vertical.
+        if f < e
+            int m = e - f
+            array<int> ts = array.new<int>()
+            int acc = time
+            for i = 0 to m - 1
+                int k = f + i
+                int dur = this.path.get(k).t - (k == s ? this.path.get(s).t0 : this.path.get(k - 1).t)
+                if i == 0
+                    float legStart = k == s ? this.path.get(s).y0 : this.path.get(k - 1).ln.get_y2()
+                    float yk = this.path.get(k).ln.get_y2()
+                    float span = math.abs(yk - legStart)
+                    float frac = span > 0 ? math.max(0.25, math.min(1.5, math.abs(yk - close) / span)) : 1.0
+                    dur := math.round(dur * frac)
+                acc += math.max(dur, 2 * barMs)
+                ts.push(acc)
+            int cap = time + PATH_MAX_BARS * barMs
+            if ts.get(m - 1) > cap
+                float fc = float(cap - time) / float(ts.get(m - 1) - time)
+                for i = 0 to m - 1
+                    ts.set(i, time + math.round((ts.get(i) - time) * fc))
+            for i = 0 to m - 1
+                int x1 = i == 0 ? time : ts.get(i - 1)
+                int x2 = math.max(ts.get(i), x1 + barMs)
+                ts.set(i, x2)
+                PathLeg g = this.path.get(f + i)
+                // Set on every pass: the leg that starts the visible path changes as price moves.
+                g.ln.set_y1(i == 0 ? close : this.path.get(f + i - 1).ln.get_y2())
+                g.ln.set_x1(x1)
+                g.ln.set_x2(x2)
+                g.lb.set_x(x2)
+                g.lb.set_tooltip(g.tip + "\nPerkiraan waktu: " + str.format_time(x2, "dd MMM yyyy HH:mm", syminfo.timezone))
+        s := e
+    this
+
+// Expected path of the next waves from pivot (t0, p0): one leg per price, each lasting durs ms.
+method projPath(Layer this, int t0, float p0, array<float> prices, array<int> durs, array<string> names, string basis) =>
+    // A scenario that projects a price at or below zero is not drawn.
+    bool positive = prices.size() > 0
+    for pr in prices
+        if pr <= 0
+            positive := false
+    if this.proj and showPath and positive and not this.altDraw
+        this.leg0T0 := t0
+        this.leg0P0 := p0
+        this.leg0T1 := t0 + math.max(durs.get(0), barMs)
+        this.leg0Y := prices.get(0)
+    if this.proj and showPath and positive and this.live
+        // Scenario direction: the count's bias (or candidate direction), reversed for the alternative.
+        int dP = this.altDraw ? this.altDir : this.bias != 0 ? this.bias : this.candDir
+        int dS = this.altDraw ? -dP : dP
+        color pc = dS == 1 ? colUp : dS == -1 ? colDn : this.col
+        string caseTxt = dS == 1 ? "Bull case" : dS == -1 ? "Bear case" : ""
+        string scen = caseTxt + (this.altDraw ? " (skenario alternatif)" : " (skenario utama)")
+        int acc = t0
+        float prev = p0
+        for i = 0 to prices.size() - 1
+            float y = prices.get(i)
+            int dirY = y > prev ? 1 : -1
+            acc += math.max(durs.get(i), barMs)
+            string tip = scen + ", " + this.name + " " + this.tfText + ": perkiraan " + names.get(i) + " di " + f_fmt(y) + "\n" + basis +
+                 "\nWaktu diperkirakan dari durasi gelombang sebelumnya dan dapat meleset."
+            color lc = color.new(pc, this.altDraw ? 40 : 15)
+            // The last point names its case, so bull and bear paths read apart at a glance.
+            string pBase = f_waveBase(names.get(i) + "?", i == prices.size() - 1 ? caseTxt : "", y)
+            line ln = line.new(t0, prev, acc, y, xloc = xloc.bar_time, color = lc, width = f_width(this.deg), style = this.altDraw ? line.style_dotted : line.style_dashed)
+            label lb = label.new(acc, y, f_waveRender(pBase, dirY, 0), xloc = xloc.bar_time,
+                 style = dirY == 1 ? label.style_label_down : label.style_label_up, color = color.new(pc, 100),
+                 textcolor = f_txt(pc), size = f_labelSize(this.deg), tooltip = tip)
+            this.path.push(PathLeg.new(ln, lb, acc, i == 0 ? t0 : na, i == 0 ? p0 : na, lc, f_txt(pc), tip, dirY, pBase))
+            prev := y
+        this.layoutPath()
+    this
+
+// Zigzag A-B-C against direction d after the last price in prices (p0 when empty), ending
+// depth away: C = A and B retraces 0.618 of A, so A = depth / 1.382. Leg times are
+// Fibonacci fractions (0.236, 0.146, 0.236) of the move before the correction.
+method pathAbc(Layer this, int t0, float p0, int d, float depth, int moveMs, array<float> prices, array<int> durs, array<string> names, string basis) =>
+    float start = prices.size() > 0 ? prices.last() : p0
+    float lenA = depth / 1.382
+    float a = start - d * lenA
+    float b = a + d * lenA * 0.618
+    prices.push(a)
+    prices.push(b)
+    prices.push(b - d * lenA)
+    durs.push(math.round(moveMs * 0.236))
+    durs.push(math.round(moveMs * 0.146))
+    durs.push(math.round(moveMs * 0.236))
+    for i = 1 to 3
+        names.push(f_waveName(this.deg, false, i))
+    this.projPath(t0, p0, prices, durs, names, basis)
+
+// Labels the pivots of the developing count from its start (0), so the count shows
+// before it completes. An empty name draws the leg without a label. A label on a pivot
+// that already carries one is stacked next to it by stackWaveLabels().
+method devCount(Layer this, array<Pivot> pts, array<string> names) =>
+    if this.show and this.live
+        for i = 0 to pts.size() - 1
+            Pivot p = pts.get(i)
+            if i > 0
+                Pivot a = pts.get(i - 1)
+                this.devLines.push(line.new(a.time, a.price, p.time, p.price, xloc = xloc.bar_time, color = color.new(this.col, 15),
+                     width = f_width(this.deg), style = line.style_dotted))
+            string nm = names.get(i)
+            if nm != ""
+                string dBase = f_waveBase(nm, "", p.price)
+                this.devDirs.push(p.dir)
+                this.devBase.push(dBase)
+                this.devLabels.push(label.new(p.time, p.price, f_waveRender(dBase, p.dir, showSwingTags ? 1 : 0), xloc = xloc.bar_time, style = p.dir == 1 ? label.style_label_down : label.style_label_up,
+                     color = color.new(this.col, 100), textcolor = f_txt(this.col), size = f_labelSize(this.deg),
+                     tooltip = "Hitungan berjalan " + this.name + " " + this.tfText + ": " + nm + " di " + f_fmt(p.price)))
+    this
+
+// Opposite scenario of the current count: a zigzag against the primary direction from the
+// primary start, ending past invalidation by 0.382 of the distance to it (at most 0.382 of
+// the primary first leg; 0.236 of that leg when the count starts on its invalidation).
+// Its A leg lasts as long as the primary first leg. Stored here when the count is built and
+// kept after invalidation, when it is the scenario in play; drawn on the last bar by drawAlt().
+method storeAlt(Layer this) =>
+    this.altDir := 0
+    int dP = this.bias != 0 ? this.bias : this.candDir
+    if dP != 0 and not na(this.inv) and not na(this.leg0T0)
+        int t0 = this.leg0T0
+        float p0 = this.leg0P0
+        float ref = math.abs(this.leg0Y - p0)
+        // The opposite case reaches 0.618 of the primary first leg past invalidation. A bear
+        // case is capped at half the invalidation price, so it never projects near or below zero.
+        float over = ref * 0.618
+        if dP == 1
+            over := math.min(over, this.inv * 0.5)
+        if ref > 0 and (p0 - (this.inv - dP * over)) * dP > 0
+            this.altDir := dP
+            this.altT0 := t0
+            this.altP0 := p0
+            this.altInv := this.inv
+            this.altOver := over
+            this.altMs := math.round((this.leg0T1 - t0) / 0.236)
+    this
+
+method canAlt(Layer this) =>
+    showAlt and showPath and this.proj and this.active and this.altDir != 0
+
+// Removes the alternative scenario legs, which always sit after the primary ones.
+method clearAlt(Layer this) =>
+    if this.altStart >= 0
+        while this.path.size() > this.altStart
+            PathLeg g = this.path.pop()
+            g.ln.delete()
+            g.lb.delete()
+        this.altStart := -1
+    this
+
+method drawAlt(Layer this) =>
+    if this.canAlt()
+        this.altStart := this.path.size()
+        float depth = (this.altP0 - (this.altInv - this.altDir * this.altOver)) * this.altDir
+        string head = this.setupKind == 0 ? "Hitungan utama batal di " + f_fmt(this.altInv) + ", skenario ini sedang berjalan. " :
+             "Berlaku bila candle ditutup melewati invalidasi " + f_fmt(this.altInv) + ". "
+        this.altDraw := true
+        this.pathAbc(this.altT0, this.altP0, this.altDir, depth, this.altMs, array.new<float>(), array.new<int>(), array.new<string>(),
+             head + "Zigzag melewati invalidasi sejauh 0.618 kaki pertama skenario utama (bear case paling dalam setengah harga invalidasi).")
+        this.altDraw := false
+        if this.path.size() == this.altStart
+            this.altStart := -1
+    this
+
+// Projections end past the last candle. All degrees share one caption column, where
+// f_groupCaptions merges close levels, so long captions never run into another column.
+f_projRight() =>
+    time + projBars * barMs
+
+// Rebuilds the developing count and its projections from the latest pivots.
+method updateState(Layer this) =>
+    this.state := "Belum ada hitungan valid"
+    this.setupKind := 0
+    this.candDir := 0
+    this.bias := 0
+    this.inv := na
+    this.target := na
+    this.tgtDir := 0
+    this.trigger := na
+    this.stopRef := na
+    this.triggerFired := false
+    this.targetHit := false
+    this.setupScore := na
+    int n = this.pivots.size()
+    Pattern lp = this.lastPattern()
+    int lastEnd = na(lp) ? 0 : lp.endTime
+    int k = na(lp) ? n : this.countAfter(lp.endTime)
+    int x2 = f_projRight()
+    bool done = false
+    if not na(lp) and lp.kind == 1 and k <= 1
+        int d = lp.dir
+        float len = math.abs(lp.endPrice - lp.startPrice)
+        float f382 = lp.endPrice - d * len * 0.382
+        float f500 = lp.endPrice - d * len * 0.5
+        float f618 = lp.endPrice - d * len * 0.618
+        // After an extended wave 5 the correction usually reaches wave 2 of the extension (double
+        // retracement); after an ending diagonal it returns quickly to the start of the diagonal.
+        bool endDiag = str.contains(lp.name, "akhir")
+        float tgtC = lp.ext == 5 and not na(lp.extW2) ? lp.extW2 : endDiag ? lp.startPrice : f382
+        string tgtTxt = lp.ext == 5 ? "Retracement ganda (W2 extension)" : endDiag ? "Awal diagonal (target koreksi)" : "Koreksi 0.382"
+        this.state := "Fase motif 1-5 " + f_dirTxt(d) + " selesai (" + lp.name + (lp.ext != 0 ? ", gelombang " + str.tostring(lp.ext) + " memanjang" : "") +
+             "), masuk fase koreksi A-B-C"
+        this.setupKind := 3
+        this.bias := -d
+        this.inv := lp.endPrice
+        this.target := tgtC
+        this.tgtDir := -d
+        if this.proj
+            color c = d == 1 ? colDn : colUp
+            this.projZone(lp.endTime, x2, f382, f618, c, "zona koreksi 0.382-0.618 setelah impuls")
+            this.projLevel(lp.endTime, x2, f382, "Koreksi 0.382", c, tgtC == f382 ? line.style_solid : line.style_dotted)
+            this.projLevel(lp.endTime, x2, f500, "Koreksi 0.5", c, line.style_dotted)
+            this.projLevel(lp.endTime, x2, f618, "Koreksi 0.618", c, line.style_dotted)
+            if tgtC != f382
+                this.projLevel(lp.endTime, x2, tgtC, tgtTxt, c, line.style_solid)
+            this.projLevel(lp.endTime, x2, lp.endPrice, "Invalidasi (W5 masih memanjang)", colInv, line.style_dashed)
+            this.pathAbc(lp.endTime, lp.endPrice, d, math.abs(lp.endPrice - tgtC), lp.endTime - lp.startTime, array.new<float>(), array.new<int>(), array.new<string>(),
+                 "Fase koreksi A-B-C setelah fase motif, zigzag ke " + str.lower(tgtTxt) + ": C = A, B retrace 0.618 dari A.")
+        done := true
+    if not done and not na(lp) and lp.kind == 1 and k == 2 and n >= 3
+        Pivot e = this.at(2)
+        Pivot a = this.at(1)
+        Pivot b = this.at(0)
+        int d = lp.dir
+        float lenA = (e.price - a.price) * d
+        float rB = lenA > 0 ? (b.price - a.price) * d / lenA : na
+        if e.time == lp.endTime and lenA > 0 and rB > 0 and rB <= 1.45
+            bool expanded = rB > 1.05
+            float c618 = b.price - d * lenA * 0.618
+            float c100 = b.price - d * lenA
+            float c124 = b.price - d * lenA * 1.236
+            float c162 = b.price - d * lenA * 1.618
+            this.state := "Gelombang C " + f_dirTxt(-d) + " berjalan, B retrace " + f_ratio(rB) + " dari A" + (expanded ? " (flat melebar atau berjalan)" : "")
+            this.setupKind := 4
+            this.bias := -d
+            this.inv := b.price
+            this.target := expanded ? c124 : c100
+            this.tgtDir := -d
+            this.devCount(this.pickRun(2, 3), array.from("", f_letter(this.deg, "A"), f_letter(this.deg, "B")))
+            if this.proj
+                color c = d == 1 ? colDn : colUp
+                this.reactZone(b.time, x2, c100, c162)
+                this.projLevel(b.time, x2, c618, "C 0.618 A", c, line.style_dotted)
+                this.projLevel(b.time, x2, c100, "C = A", c, expanded ? line.style_dotted : line.style_solid)
+                this.projLevel(b.time, x2, c124, "C 1.236 A", c, expanded ? line.style_solid : line.style_dotted)
+                this.projLevel(b.time, x2, c162, "C 1.618 A", c, line.style_dotted)
+                this.projLevel(b.time, x2, b.price, "Invalidasi", colInv, line.style_dashed)
+                this.projPath(b.time, b.price, array.from(this.target), array.from(a.time - e.time), array.from(f_waveName(this.deg, false, 3)),
+                     (expanded ? "Gelombang C = 1.236 gelombang A (flat melebar)" : "Gelombang C = gelombang A") + ", durasi sama dengan gelombang A.")
+            done := true
+    if not done and not na(lp) and lp.kind == 3 and lp.role == 2 and k == 0
+        int d = lp.dir
+        float c618 = lp.endPrice + d * lp.wLen * 0.618
+        float c100 = lp.endPrice + d * lp.wLen
+        float c124 = lp.endPrice + d * lp.wLen * 1.236
+        float c162 = lp.endPrice + d * lp.wLen * 1.618
+        this.state := lp.name + " di gelombang B selesai, gelombang C " + f_dirTxt(d) + " berjalan"
+        this.setupKind := 4
+        this.bias := d
+        this.inv := lp.endPrice
+        this.target := c100
+        this.tgtDir := d
+        if this.proj
+            color c = d == 1 ? colUp : colDn
+            this.reactZone(lp.endTime, x2, c100, c162)
+            this.projLevel(lp.endTime, x2, c618, "C 0.618 A", c, line.style_dotted)
+            this.projLevel(lp.endTime, x2, c100, "C = A", c, line.style_solid)
+            this.projLevel(lp.endTime, x2, c124, "C 1.236 A", c, line.style_dotted)
+            this.projLevel(lp.endTime, x2, lp.endPrice, "Invalidasi", colInv, line.style_dashed)
+            this.projPath(lp.endTime, lp.endPrice, array.from(c100), array.from(math.round((lp.endTime - lp.startTime) * 0.618)),
+                 array.from(f_waveName(this.deg, false, 3)), "Gelombang C = gelombang A setelah triangle di gelombang B.")
+        done := true
+    if not done and not na(lp) and lp.kind == 3 and lp.role == 4 and k == 0
+        int d = lp.dir
+        float thrust = lp.endPrice + d * lp.wLen
+        this.state := lp.name + " di gelombang 4 selesai, menunggu dorongan gelombang 5 " + f_dirTxt(d)
+        this.setupKind := 7
+        this.bias := d
+        this.inv := lp.endPrice
+        this.target := thrust
+        this.tgtDir := d
+        if this.proj
+            color c = d == 1 ? colUp : colDn
+            this.projLevel(lp.endTime, x2, thrust, "W5 = lebar triangle", c, line.style_solid)
+            this.projLevel(lp.endTime, x2, lp.endPrice, "Invalidasi", colInv, line.style_dashed)
+            this.projPath(lp.endTime, lp.endPrice, array.from(thrust), array.from(math.round((lp.endTime - lp.startTime) * 0.618)),
+                 array.from(f_waveName(this.deg, true, 5)), "Dorongan gelombang 5 kira-kira sepanjang kaki terlebar triangle.")
+        done := true
+    if not done and not na(lp) and lp.kind == 2 and k <= 1
+        int d = -lp.dir
+        Pattern impC = this.lastImpulse()
+        bool cyc = not na(impC) and impC.endTime == lp.startTime
+        this.state := cyc ? "Siklus 8 gelombang selesai (impuls " + f_dirTxt(impC.dir) + " + koreksi " + lp.name + "), siklus baru " + f_dirTxt(d) + " diperkirakan" :
+             "Koreksi " + lp.name + " selesai, tren " + f_dirTxt(d) + " diperkirakan berlanjut"
+        this.setupKind := 6
+        this.setupScore := lp.score
+        this.bias := d
+        this.inv := lp.endPrice
+        this.target := lp.startPrice
+        this.tgtDir := d
+        if this.proj
+            color c = d == 1 ? colUp : colDn
+            this.projLevel(lp.endTime, x2, lp.startPrice, "Awal koreksi", c, line.style_solid)
+            this.projLevel(lp.endTime, x2, lp.endPrice, "Invalidasi", colInv, line.style_dashed)
+            array<float> pp = array.from(lp.startPrice)
+            array<int> pd = array.from(lp.endTime - lp.startTime)
+            array<string> pn = array.from("Tren berlanjut")
+            string basis = "Tren kembali ke awal koreksi, durasi sama dengan koreksi."
+            // Fractal: the finished cycle is waves 1 and 2 of the next degree, and its wave 3 is often 1.618 times the cycle's impulse.
+            if cyc and this.deg < 3
+                string nm3 = f_waveName(this.deg + 1, true, 3)
+                float c3 = lp.endPrice + d * math.abs(impC.endPrice - impC.startPrice) * 1.618
+                this.projLevel(lp.endTime, x2, c3, "Gelombang " + nm3 + " 1.618 x impuls siklus", c, line.style_dotted)
+                pp.push(c3)
+                pd.push(math.round((impC.endTime - impC.startTime) * 1.618))
+                pn.push(nm3)
+                basis := basis + " Setelah itu gelombang " + nm3 + " derajat di atasnya diperkirakan sepanjang 1.618 kali impuls siklus sebelumnya."
+            this.projPath(lp.endTime, lp.endPrice, pp, pd, pn, basis)
+        // Alternative count: the move after the correction is wave X, and Y (or Z) follows.
+        if k == 1 and lp.name != "WXYXZ" and not na(lp.wLen) and lp.wLen > 0
+            Pivot x = this.at(0)
+            float rX = (x.price - lp.endPrice) * d / lp.wLen
+            if rX >= 0.45 and rX <= 0.9
+                string nx = lp.name == "WXY" ? "Z" : "Y"
+                float y618 = x.price - d * lp.wLen * 0.618
+                float y100 = x.price - d * lp.wLen
+                float y124 = x.price - d * lp.wLen * 1.236
+                float y162 = x.price - d * lp.wLen * 1.618
+                this.state := this.state + ". Alternatif: X selesai (" + f_ratio(rX) + " dari W), " + nx + " " + f_dirTxt(-d) + " menuju " + f_fmt(y100)
+                if this.proj
+                    color c2 = d == 1 ? colDn : colUp
+                    this.reactZone(x.time, x2, y100, y162)
+                    this.projLevel(x.time, x2, y618, nx + " 0.618 W", c2, line.style_dotted)
+                    this.projLevel(x.time, x2, y100, nx + " = W", c2, line.style_solid)
+                    this.projLevel(x.time, x2, y124, nx + " 1.236 W", c2, line.style_dotted)
+                    this.projLevel(x.time, x2, y162, "Batas " + nx + " 1.618 W", colInv, line.style_dotted)
+        done := true
+    if not done and n >= 5
+        Pivot q0 = this.at(4)
+        Pivot q1 = this.at(3)
+        Pivot q2 = this.at(2)
+        Pivot q3 = this.at(1)
+        Pivot q4 = this.at(0)
+        Pivot qPrev = n >= 6 ? this.at(5) : na
+        if q0.time >= lastEnd
+            [ok, d, w1, w3, r2, r4] = f_dev1234(q0, q1, q2, q3, q4, qPrev)
+            if ok
+                float a13 = (q3.price - q0.price) * d
+                float w4 = w3 * r4
+                float t618 = q4.price + d * w1 * 0.618
+                float t100 = q4.price + d * w1
+                float t162 = q4.price + d * w1 * 1.618
+                float tAlt = q4.price + d * a13 * 0.618
+                float i124 = q4.price + d * w4 * 1.236
+                float i162 = q4.price + d * w4 * 1.618
+                // EWF: usually only one motive wave extends. A wave 3 under 1.618 W1 leaves the extension to wave 5.
+                bool ext5 = w3 / w1 < 1.618
+                float w5T = ext5 ? t162 : t100
+                this.state := "Gelombang 5 " + f_dirTxt(d) + " berjalan, gelombang 4 retrace " + f_ratio(r4) + " dari gelombang 3" +
+                     (ext5 ? ", W5 berpotensi diperpanjang (W3 di bawah 1.618 W1)" : "")
+                this.setupKind := 2
+                this.bias := d
+                this.inv := q1.price
+                this.target := w5T
+                this.devCount(this.pickRun(4, 5), array.from(f_wrap(this.deg, "0"), f_waveName(this.deg, true, 1), f_waveName(this.deg, true, 2),
+                     f_waveName(this.deg, true, 3), f_waveName(this.deg, true, 4)))
+                this.tgtDir := d
+                this.stopRef := q4.price
+                if this.proj
+                    color c = d == 1 ? colUp : colDn
+                    this.projZone(q4.time, x2, t618, t100, c, "zona target gelombang 5 (0.618-1.0 W1)")
+                    this.projLevel(q4.time, x2, t618, "W5 0.618 W1", c, line.style_dotted)
+                    this.projLevel(q4.time, x2, t100, "W5 = W1", c, ext5 ? line.style_dotted : line.style_solid)
+                    this.projLevel(q4.time, x2, tAlt, "W5 0.618 W1-W3", c, line.style_dotted)
+                    this.projLevel(q4.time, x2, i124, "W5 1.236 W4", c, line.style_dotted)
+                    this.projLevel(q4.time, x2, i162, "W5 1.618 W4", c, line.style_dotted)
+                    this.projLevel(q4.time, x2, t162, "W5 1.618 W1", c, ext5 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q1.time, x2, q1.price, "Invalidasi (masuk wilayah W1)", colInv, line.style_dashed)
+                    int tW1 = q1.time - q0.time
+                    this.pathAbc(q4.time, q4.price, d, (w5T - q0.price) * d * 0.382, q4.time - q0.time + math.round(tW1 * (ext5 ? 1.618 : 1.0)),
+                         array.from(w5T), array.from(math.round(tW1 * (ext5 ? 1.618 : 1.0))), array.from(f_waveName(this.deg, true, 5)),
+                         (ext5 ? "Gelombang 5 = 1.618 gelombang 1 karena gelombang 3 tidak diperpanjang" : "Gelombang 5 = gelombang 1") +
+                         ", lalu koreksi zigzag ke 0.382 impuls.")
+                done := true
+    if not done and n >= 4
+        Pivot q0 = this.at(3)
+        Pivot q1 = this.at(2)
+        Pivot q2 = this.at(1)
+        Pivot q3 = this.at(0)
+        Pivot qPrev = n >= 5 ? this.at(4) : na
+        if q0.time >= lastEnd
+            [ok, d, w1, w3, r2, e3] = f_dev123(q0, q1, q2, q3, qPrev)
+            if ok
+                float f146 = q3.price - d * w3 * 0.146
+                float f236 = q3.price - d * w3 * 0.236
+                float f382 = q3.price - d * w3 * 0.382
+                float f500 = q3.price - d * w3 * 0.5
+                // Alternation: a deep wave 2 is usually followed by a shallow wave 4, and the reverse.
+                bool shallow4 = r2 >= 0.618
+                float w4T = shallow4 ? f236 : f382
+                this.state := "Pullback gelombang 4, gelombang 3 = " + f_ratio(e3) + "x gelombang 1, alternasi: gelombang 4 " + (shallow4 ? "dangkal" : "lebih dalam")
+                this.setupKind := 5
+                this.bias := d
+                this.inv := q1.price
+                this.target := w4T
+                this.devCount(this.pickRun(3, 4), array.from(f_wrap(this.deg, "0"), f_waveName(this.deg, true, 1), f_waveName(this.deg, true, 2),
+                     f_waveName(this.deg, true, 3)))
+                this.tgtDir := -d
+                if this.proj
+                    color c = d == 1 ? colUp : colDn
+                    this.projZone(q3.time, x2, f236, f382, c, "zona pullback gelombang 4 (0.236-0.382)")
+                    this.projLevel(q3.time, x2, f146, "W4 0.146", c, line.style_dotted)
+                    this.projLevel(q3.time, x2, f236, "W4 0.236", c, shallow4 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q3.time, x2, f382, "W4 0.382", c, shallow4 ? line.style_dotted : line.style_solid)
+                    this.projLevel(q3.time, x2, f500, "Batas W4 0.5", colInv, line.style_dotted)
+                    this.projLevel(q1.time, x2, q1.price, "Invalidasi (masuk wilayah W1)", colInv, line.style_dashed)
+                    bool ext5 = e3 < 1.618
+                    this.projPath(q3.time, q3.price, array.from(w4T, w4T + d * w1 * (ext5 ? 1.618 : 1.0)),
+                         array.from(q2.time - q1.time, math.round((q1.time - q0.time) * (ext5 ? 1.618 : 1.0))),
+                         array.from(f_waveName(this.deg, true, 4), f_waveName(this.deg, true, 5)),
+                         "Gelombang 4 retrace " + (shallow4 ? "0.236" : "0.382") + " gelombang 3 (alternasi dengan gelombang 2) selama durasi gelombang 2, lalu gelombang 5 = " +
+                         (ext5 ? "1.618 gelombang 1 karena gelombang 3 tidak diperpanjang." : "gelombang 1."))
+                done := true
+    if not done and n >= 3
+        Pivot q0 = this.at(2)
+        Pivot q1 = this.at(1)
+        Pivot q2 = this.at(0)
+        Pivot qPrev = n >= 4 ? this.at(3) : na
+        if q0.time >= lastEnd
+            [ok, d, w1, r2] = f_dev12(q0, q1, q2, qPrev)
+            if ok
+                float t100 = q2.price + d * w1
+                float t162 = q2.price + d * w1 * 1.618
+                float t200 = q2.price + d * w1 * 2.0
+                float t262 = q2.price + d * w1 * 2.618
+                float t324 = q2.price + d * w1 * 3.236
+                // The pivot confirms some bars late, so price may already be past 1.618: aim at the next extension.
+                float reach = (this.procPx - q2.price) * d / w1
+                float e3T = reach < 1.618 ? 1.618 : reach < 2.0 ? 2.0 : reach < 2.618 ? 2.618 : 3.236
+                float w3T = q2.price + d * w1 * e3T
+                this.state := "Gelombang 3 " + f_dirTxt(d) + " berjalan, gelombang 2 retrace " + f_ratio(r2) + " dari gelombang 1"
+                this.setupKind := 1
+                // Wave 2 quality: 100 at the typical 0.618 retrace, falling with the distance from it.
+                this.setupScore := math.max(0.0, 100 - math.abs(r2 - 0.618) / 0.618 * 100)
+                this.bias := d
+                this.inv := q0.price
+                this.target := w3T
+                this.devCount(this.pickRun(2, 3), array.from(f_wrap(this.deg, "0"), f_waveName(this.deg, true, 1), f_waveName(this.deg, true, 2)))
+                this.tgtDir := d
+                this.trigger := q1.price
+                this.stopRef := q2.price
+                // The pivot confirms some bars late; a break that already happened is not signalled again.
+                this.triggerFired := (this.procPx - q1.price) * d > 0
+                if this.proj
+                    color c = d == 1 ? colUp : colDn
+                    this.projZone(q2.time, x2, t162, t262, c, "zona target gelombang 3 (1.618-2.618 W1)")
+                    this.projLevel(q2.time, x2, t100, "W3 1.0", c, line.style_dotted)
+                    this.projLevel(q2.time, x2, t162, "W3 1.618", c, e3T == 1.618 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q2.time, x2, t200, "W3 2.0", c, e3T == 2.0 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q2.time, x2, t262, "W3 2.618", c, e3T == 2.618 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q2.time, x2, t324, "W3 3.236", c, e3T == 3.236 ? line.style_solid : line.style_dotted)
+                    this.projLevel(q1.time, x2, q1.price, "Pemicu W3", c, line.style_dashed)
+                    this.projLevel(q0.time, x2, q0.price, "Invalidasi", colInv, line.style_dashed)
+                    // Wave 4 alternates with wave 2. Even a 0.382 retrace of a 1.618 wave 3 ends at
+                    // 1.0 W1 from the wave 2 end, so it stays out of wave 1 territory.
+                    float r4P = r2 >= 0.618 ? 0.236 : 0.382
+                    float w4P = w3T - d * w1 * e3T * r4P
+                    int tW1 = q1.time - q0.time
+                    this.projPath(q2.time, q2.price, array.from(w3T, w4P, w4P + d * w1),
+                         array.from(math.round(tW1 * 1.618), q2.time - q1.time, tW1),
+                         array.from(f_waveName(this.deg, true, 3), f_waveName(this.deg, true, 4), f_waveName(this.deg, true, 5)),
+                         "Gelombang 3 = " + str.tostring(e3T) + " gelombang 1, gelombang 4 retrace " + str.tostring(r4P) +
+                         " gelombang 3 (alternasi dengan gelombang 2), gelombang 5 = gelombang 1.")
+                done := true
+    if not done and showCand and n >= 2
+        Pivot c0 = this.at(1)
+        Pivot c1 = this.at(0)
+        Pivot cs = n >= 3 ? this.at(2) : na
+        float lenLast = math.abs(c1.price - c0.price)
+        float lenPrev = na(cs) ? na : math.abs(c0.price - cs.price)
+        string why = " (kandidat, belum memenuhi semua aturan)"
+        if not na(lenPrev) and lenPrev > 0 and lenLast < lenPrev
+            // The last swing retraced part of the one before it: waves 1 and 2.
+            int d = c0.price > cs.price ? 1 : -1
+            float w1 = lenPrev
+            float r2 = lenLast / w1
+            float w3T = c1.price + d * w1 * 1.618
+            float r4P = r2 >= 0.618 ? 0.236 : 0.382
+            float w4P = w3T - d * w1 * 1.618 * r4P
+            int tW1 = c0.time - cs.time
+            this.state := "Gelombang 1-2 " + f_dirTxt(d) + why + ", gelombang 2 retrace " + f_ratio(r2) + " dari gelombang 1"
+            this.setupKind := 8
+            this.candDir := d
+            this.inv := cs.price
+            this.target := w3T
+            this.tgtDir := d
+            this.devCount(this.pickRun(2, 3), array.from(f_wrap(this.deg, "0"), f_waveName(this.deg, true, 1), f_waveName(this.deg, true, 2)))
+            if this.proj
+                color c = d == 1 ? colUp : colDn
+                this.projLevel(c1.time, x2, w3T, "W3 1.618 (kandidat)", c, line.style_solid)
+                this.projLevel(cs.time, x2, cs.price, "Invalidasi kandidat", colInv, line.style_dashed)
+                this.projPath(c1.time, c1.price, array.from(w3T, w4P, w4P + d * w1),
+                     array.from(math.round(tW1 * 1.618), c1.time - c0.time, tW1),
+                     array.from(f_waveName(this.deg, true, 3), f_waveName(this.deg, true, 4), f_waveName(this.deg, true, 5)),
+                     "Kandidat: gelombang 3 = 1.618 gelombang 1, gelombang 4 retrace " + str.tostring(r4P) + " gelombang 3, gelombang 5 = gelombang 1.")
+        else
+            // The last swing is the largest recent move: wave 1 just ended.
+            int d = c1.price > c0.price ? 1 : -1
+            float w1 = lenLast
+            float w2T = c1.price - d * w1 * 0.618
+            float w3T = w2T + d * w1 * 1.618
+            int tW1 = c1.time - c0.time
+            this.state := "Gelombang 1 " + f_dirTxt(d) + " selesai" + why + ", menunggu gelombang 2"
+            this.setupKind := 8
+            this.candDir := d
+            this.inv := c0.price
+            this.target := w2T
+            this.tgtDir := -d
+            this.devCount(this.pickRun(1, 2), array.from(f_wrap(this.deg, "0"), f_waveName(this.deg, true, 1)))
+            if this.proj
+                color c = d == 1 ? colUp : colDn
+                this.projLevel(c1.time, x2, c1.price - d * w1 * 0.5, "W2 0.5 (kandidat)", c, line.style_dotted)
+                this.projLevel(c1.time, x2, w2T, "W2 0.618 (kandidat)", c, line.style_solid)
+                this.projLevel(c0.time, x2, c0.price, "Invalidasi kandidat", colInv, line.style_dashed)
+                this.projPath(c1.time, c1.price, array.from(w2T, w3T),
+                     array.from(math.round(tW1 * 0.618), math.round(tW1 * 1.618)),
+                     array.from(f_waveName(this.deg, true, 2), f_waveName(this.deg, true, 3)),
+                     "Kandidat: gelombang 2 retrace 0.618 gelombang 1, lalu gelombang 3 = 1.618 gelombang 1.")
+    this.storeAlt()
+    this
+
+// Impulse 1-5 plus the correction after it is one 8-wave cycle. A dotted line spans it, and
+// its two ends carry the next higher degree's 1? and 2?, the fractal reading of the cycle.
+// The drawings belong to the correction, so they go when the correction is cancelled.
+method markCycle(Layer this, Pattern corr, Pattern imp) =>
+    if this.show and not na(corr) and not na(imp) and imp.endTime == corr.startTime
+        corr.lines.push(line.new(imp.startTime, imp.startPrice, corr.endTime, corr.endPrice, xloc = xloc.bar_time,
+             color = color.new(this.col, 60), style = line.style_dotted, width = 1))
+        if this.deg < 3
+            int hd = this.deg + 1
+            string tip = "Siklus 8 gelombang " + this.name + " " + this.tfText + ": impuls 1-5 " + f_dirTxt(imp.dir) + " dan koreksi " + corr.name +
+                 ".\nSecara fraktal, siklus ini kandidat gelombang " + f_waveName(hd, true, 1) + " dan " + f_waveName(hd, true, 2) + " derajat di atasnya."
+            for w = 1 to 2
+                this.waveLabel(corr, w == 1 ? Pivot.new(imp.endPrice, imp.endTime, imp.dir, na) : Pivot.new(corr.endPrice, corr.endTime, -imp.dir, na),
+                     f_waveName(hd, true, w) + "?", "", tip)
+    this
+
+method process(Layer this, int ev) =>
+    this.live := barstate.islast
+    this.renderPending := not this.live
+    this.procPx := this.px
+    this.clearProj()
+    // A more extreme replacement pivot cancels the pattern that ended on the old pivot,
+    // then the pattern is searched again with the new end.
+    int remKind = 0
+    int remStart = na
+    if ev == 2 and this.patterns.size() > 0
+        Pattern old = this.patterns.last()
+        if old.endTime == this.replacedTime
+            remKind := old.kind
+            remStart := old.startTime
+            old.erase()
+            this.patterns.pop()
+            // The correction it had replaced is valid again until the search below replaces it once more.
+            if old.hasShelf and this.shelf.size() > 0
+                Pattern back = this.shelf.pop()
+                back.setShown(true, this.col)
+                this.patterns.push(back)
+    int n = this.pivots.size()
+    Pattern lp = this.lastPattern()
+    Pattern imp = this.lastImpulse()
+    int lastEnd = na(lp) ? 0 : lp.endTime
+    bool added = false
+    bool newCorr = false
+    // The correction branches below fill these and one drawPath() call draws the result:
+    // every call site of a method adds its body to the compiled script.
+    Pattern cPt = na
+    array<Pivot> cPts = na
+    array<string> cNames = na
+    array<string> cExtras = na
+    string cTip = ""
+    int cSkip = -1
+    // Extended impulse on the last ten pivots: wave 1, 3 or 5 subdivides into five waves.
+    // It is tried before the six-pivot impulse, whose pivots may be that extension.
+    // The extension may replace the last pattern when that is exactly the sub-wave impulse.
+    array<Pivot> q = n >= 10 ? this.pickRun(9, 10) : na
+    array<Pivot> extMain = na
+    int extWave = 0
+    bool absorb = false
+    if not na(q)
+        Pivot prevE = n >= 11 ? this.at(10) : na
+        Pivot noPrev = na
+        float best = -1.0
+        for e in array.from(5, 3, 1)
+            array<int> mi = e == 5 ? array.from(0, 1, 2, 3, 4, 9) : e == 3 ? array.from(0, 1, 2, 7, 8, 9) : array.from(0, 5, 6, 7, 8, 9)
+            int s0 = e == 5 ? 4 : e == 3 ? 2 : 0
+            array<Pivot> mp = array.new<Pivot>()
+            for x in mi
+                mp.push(q.get(x))
+            array<Pivot> sp = array.new<Pivot>()
+            for x = s0 to s0 + 5
+                sp.push(q.get(x))
+            // Pass 0 tests the main count, pass 1 the sub-waves of the extended wave.
+            bool okM = false
+            float scM = 0.0
+            bool okS = false
+            for t = 0 to 1
+                array<Pivot> tp = t == 0 ? mp : sp
+                [okT, dgT, scT, r2T, e3T, r4T, e5T, i5T, dvT, chT] = f_impulse(tp.get(0), tp.get(1), tp.get(2), tp.get(3), tp.get(4), tp.get(5), t == 0 ? prevE : noPrev)
+                if t == 0
+                    okM := okT and not dgT and scT >= minScore
+                    scM := scT
+                else
+                    okS := okT
+            float w1 = math.abs(mp.get(1).price - mp.get(0).price)
+            float w3 = math.abs(mp.get(3).price - mp.get(2).price)
+            float w5 = math.abs(mp.get(5).price - mp.get(4).price)
+            bool longest = e == 1 ? w1 >= w3 and w1 >= w5 : e == 3 ? w3 >= w1 and w3 >= w5 : w5 >= w1 and w5 >= w3
+            bool sameDir = (q.get(s0 + 1).price - q.get(s0).price) * (q.get(1).price - q.get(0).price) > 0
+            bool sub = not na(lp) and lp.kind == 1 and lp.startTime == q.get(s0).time and lp.endTime == q.get(s0 + 5).time
+            if okM and okS and longest and sameDir and (q.get(0).time >= lastEnd or sub) and scM > best
+                best := scM
+                extMain := mp
+                extWave := e
+                absorb := sub and q.get(0).time < lastEnd
+    if absorb
+        lp.erase()
+        this.patterns.pop()
+    // Impulse candidates in order, through one tryImpulse() call: 0 the extension found above,
+    // 1 an impulse or diagonal on the last six pivots, 2 an impulse whose wave 4 is the
+    // triangle that just completed.
+    for c = 0 to 2
+        array<Pivot> cand = na
+        array<Pivot> allArg = na
+        int kS = 9
+        if c == 0 and not na(extMain)
+            cand := extMain
+            allArg := q
+        else if c == 1 and na(extMain) and n >= 6 and this.at(5).time >= lastEnd
+            cand := this.pickRun(5, 6)
+            kS := 5
+        else if c == 2 and not na(lp) and lp.kind == 3 and lp.role == 4 and n >= 10 and this.countAfter(lp.endTime) == 1
+            cand := f_arr6(this.at(9), this.at(8), this.at(7), this.at(6), this.at(1), this.at(0))
+        if not added and not na(cand)
+            added := this.tryImpulse(cand, kS, allArg, c == 0 ? extWave : 0)
+    // Triangle as wave 4: waves 1 to 3, then five legs that stay out of wave 1.
+    if not added and detectTri and n >= 9 and this.at(8).time >= lastEnd
+        Pivot prevT = n >= 10 ? this.at(9) : na
+        [ok3, d3, w1t, w3t, r2t, e3t] = f_dev123(this.at(8), this.at(7), this.at(6), this.at(5), prevT)
+        [okT, typT, dT, widest] = f_triangle(this.at(5), this.at(4), this.at(3), this.at(2), this.at(1), this.at(0))
+        if ok3 and okT and dT == -d3
+            float w1End = this.at(7).price
+            bool clear = (this.at(4).price - w1End) * d3 > 0 and (this.at(2).price - w1End) * d3 > 0 and (this.at(0).price - w1End) * d3 > 0
+            if clear
+                this.drawTriangle(5, 4, d3, typT, widest, false)
+                this.evTri := true
+                added := true
+    // Triangle as wave B: impulse end, wave A, then five legs inside the impulse end.
+    // Its first legs may already have passed as an ABC; the triangle then replaces it.
+    bool afterImp = not na(imp) and not na(lp) and (lp.kind == 1 or (lp.kind == 2 and lp.startTime == imp.endTime))
+    if not added and detectTri and afterImp and n >= 7 and this.countAfter(imp.endTime) == 6 and this.at(6).time == imp.endTime
+        int iD = imp.dir
+        float lenA = (this.at(6).price - this.at(5).price) * iD
+        [okT, typT, dT, widest] = f_triangle(this.at(5), this.at(4), this.at(3), this.at(2), this.at(1), this.at(0))
+        bool inside = (this.at(4).price - imp.endPrice) * iD < 0 and (this.at(2).price - imp.endPrice) * iD < 0 and (this.at(0).price - imp.endPrice) * iD < 0
+        if lenA > 0 and okT and dT == iD and inside
+            bool replaces = lp.kind == 2
+            if replaces
+                this.shelveLast()
+            this.drawTriangle(5, 2, -iD, typT, lenA, replaces)
+            this.evTri := true
+            added := true
+    // Wave C after a wave B triangle.
+    if not added and not na(lp) and lp.kind == 3 and lp.role == 2 and n >= 8 and this.countAfter(lp.endTime) == 1
+        Pattern impB = this.lastImpulse()
+        if not na(impB) and this.at(7).time == impB.endTime
+            int iD = impB.dir
+            Pivot e = this.at(7)
+            Pivot a = this.at(6)
+            Pivot b = this.at(1)
+            Pivot c = this.at(0)
+            float lenA = (e.price - a.price) * iD
+            float cC = lenA > 0 ? (b.price - c.price) * iD / lenA : na
+            if lenA > 0 and (a.price - c.price) * iD > 0 and (c.price - impB.startPrice) * iD > 0 and cC >= 0.58 and cC < 1.7
+                Pattern pt = Pattern.new(2, -iD, e.time, c.time, e.price, c.price, na, array.new<line>(), array.new<label>(), name = "ABC", wLen = math.abs(e.price - c.price))
+                string tip = "Koreksi zigzag dengan triangle di gelombang B " + f_dirTxt(-iD) + ", " + this.name + " " + this.tfText + "\nC / A: " + f_ratio(cC)
+                array<string> names = array.from(f_waveName(this.deg, false, 1), f_waveName(this.deg, false, 2), f_waveName(this.deg, false, 3))
+                array<string> extras = array.from("", "", showRatios ? f_ratio(cC) + "x" : "")
+                cPt := pt
+                cPts := f_arr4(e, a, b, c)
+                cNames := names
+                cExtras := extras
+                cTip := tip
+                cSkip := 2
+                this.evCorr := iD
+                newCorr := true
+                added := true
+    // Corrections after the last impulse: ABC (3 swings), WXY (7) and WXYXZ (11).
+    // A correction that passes the start of the impulse breaks the continuation count and is not taken.
+    if not added and afterImp
+        int iD = imp.dir
+        int kk = this.countAfter(imp.endTime)
+        float impLen = math.abs(imp.endPrice - imp.startPrice)
+        bool withinImp = (this.at(0).price - imp.startPrice) * iD > 0
+        if kk == 3 and lp.kind == 1 and this.at(3).time == imp.endTime and withinImp
+            [okC, typ, rB, cC, scC] = f_correction(this.at(3), this.at(2), this.at(1), this.at(0), iD, impLen)
+            if okC
+                float depth = impLen > 0 ? math.abs(imp.endPrice - this.at(0).price) / impLen : na
+                Pattern pt = Pattern.new(2, -iD, this.at(3).time, this.at(0).time, this.at(3).price, this.at(0).price, scC, array.new<line>(), array.new<label>(),
+                     name = "ABC", wLen = math.abs(this.at(3).price - this.at(0).price))
+                string tip = "Koreksi " + typ + " " + f_dirTxt(-iD) + ", " + this.name + " " + this.tfText +
+                     "\nB / A: " + f_ratio(rB) +
+                     "\nC / A: " + f_ratio(cC) +
+                     "\nRetracement terhadap impuls: " + f_ratio(depth) +
+                     "\nSkor: " + str.tostring(scC, "#") + " / 100"
+                array<string> names = array.from(f_waveName(this.deg, false, 1), f_waveName(this.deg, false, 2), f_waveName(this.deg, false, 3))
+                array<string> extras = array.from("", showRatios ? f_ratio(rB) : "", (showRatios ? f_ratio(cC) + "x " + typ : typ) + " " + str.tostring(scC, "#") + "%")
+                cPt := pt
+                cPts := this.pickRun(3, 4)
+                cNames := names
+                cExtras := extras
+                cTip := tip
+                cSkip := -1
+                this.evCorr := iD
+                newCorr := true
+        if detectCombo and kk == 7 and n >= 8 and this.at(7).time == imp.endTime and withinImp
+            [okW, typW, bW, cW, scW] = f_correction(this.at(7), this.at(6), this.at(5), this.at(4), iD, na)
+            [okY, typY, bY, cY, scY] = f_correction(this.at(3), this.at(2), this.at(1), this.at(0), iD, na)
+            [okX, rX, rY, lenW] = f_combo(this.at(7), this.at(4), this.at(3), this.at(0), iD)
+            if okW and okY and okX
+                bool replaces = lp.kind == 2
+                if replaces
+                    this.shelveLast()
+                float scWY = (scW + scY) / 2
+                Pattern pt = Pattern.new(2, -iD, this.at(7).time, this.at(0).time, this.at(7).price, this.at(0).price, scWY, array.new<line>(), array.new<label>(),
+                     name = "WXY", wLen = lenW, hasShelf = replaces)
+                string tip = "Kombinasi WXY (double three) " + f_dirTxt(-iD) + ", " + this.name + " " + this.tfText +
+                     "\nW: " + typW + "\nY: " + typY + "\nX / W: " + f_ratio(rX) + "\nY / W: " + f_ratio(rY) + "\nSkor: " + str.tostring(scWY, "#") + " / 100"
+                array<string> names = array.from(f_letter(this.deg, "W"), f_letter(this.deg, "X"), f_letter(this.deg, "Y"))
+                array<string> extras = array.from("", showRatios ? f_ratio(rX) : "", (showRatios ? f_ratio(rY) + "x " : "") + str.tostring(scWY, "#") + "%")
+                cPt := pt
+                cPts := f_arr4(this.at(7), this.at(4), this.at(3), this.at(0))
+                cNames := names
+                cExtras := extras
+                cTip := tip
+                cSkip := -1
+                this.evCorr := iD
+                newCorr := true
+        if detectCombo and kk == 11 and n >= 12 and this.at(11).time == imp.endTime and withinImp
+            [okW, typW, bW, cW, scW] = f_correction(this.at(11), this.at(10), this.at(9), this.at(8), iD, na)
+            [okY, typY, bY, cY, scY] = f_correction(this.at(7), this.at(6), this.at(5), this.at(4), iD, na)
+            [okZ, typZ, bZ, cZ, scZ] = f_correction(this.at(3), this.at(2), this.at(1), this.at(0), iD, na)
+            [okX, rX, rY, lenW] = f_combo(this.at(11), this.at(8), this.at(7), this.at(4), iD)
+            float rX2 = lenW > 0 ? (this.at(3).price - this.at(4).price) * iD / lenW : na
+            float rZ = lenW > 0 ? (this.at(3).price - this.at(0).price) * iD / lenW : na
+            if okW and okY and okZ and okX and rX2 >= 0.45 and rX2 <= 0.9 and rZ >= 0.58 and rZ < 1.618
+                bool replaces = lp.kind == 2
+                if replaces
+                    this.shelveLast()
+                float scWYZ = (scW + scY + scZ) / 3
+                Pattern pt = Pattern.new(2, -iD, this.at(11).time, this.at(0).time, this.at(11).price, this.at(0).price, scWYZ, array.new<line>(), array.new<label>(),
+                     name = "WXYXZ", wLen = lenW, hasShelf = replaces)
+                string tip = "Kombinasi WXYXZ (triple three) " + f_dirTxt(-iD) + ", " + this.name + " " + this.tfText +
+                     "\nW: " + typW + "\nY: " + typY + "\nZ: " + typZ + "\nX / W: " + f_ratio(rX) + "\nY / W: " + f_ratio(rY) +
+                     "\nX kedua / W: " + f_ratio(rX2) + "\nZ / W: " + f_ratio(rZ) + "\nSkor: " + str.tostring(scWYZ, "#") + " / 100"
+                array<string> names = array.from(f_letter(this.deg, "W"), f_letter(this.deg, "X"), f_letter(this.deg, "Y"), f_letter(this.deg, "X"), f_letter(this.deg, "Z"))
+                array<string> extras = array.from("", showRatios ? f_ratio(rX) : "", showRatios ? f_ratio(rY) + "x" : "", showRatios ? f_ratio(rX2) : "", (showRatios ? f_ratio(rZ) + "x " : "") + str.tostring(scWYZ, "#") + "%")
+                cPt := pt
+                cPts := f_arr6(this.at(11), this.at(8), this.at(7), this.at(4), this.at(3), this.at(0))
+                cNames := names
+                cExtras := extras
+                cTip := tip
+                cSkip := -1
+                this.evCorr := iD
+                newCorr := true
+    if newCorr
+        this.drawPath(cPt, cPts, cNames, cExtras, cTip, line.style_dashed, cSkip)
+    // The same pattern found again on the extended pivot was already announced: redraw it without a new signal or alert.
+    Pattern np = this.lastPattern()
+    bool announced = this.evImpulse != 0 or this.evCorr != 0 or this.evTri
+    if remKind != 0 and announced and not na(np) and np.kind == remKind and np.startTime == remStart
+        this.evImpulse := 0
+        this.evDiv := false
+        this.evEndDiag := false
+        this.evCorr := 0
+        this.evTri := false
+    if newCorr
+        this.markCycle(this.lastPattern(), this.lastImpulse())
+
+// Compares this degree's direction (the impulse of a finished cycle, or the motive count in
+// progress) with the next higher active degree hi, for the dashboard.
+method fractalCheck(Layer this, Layer hi) =>
+    this.fracTxt := ""
+    if this.active and not na(hi)
+        Pattern lp = this.lastPattern()
+        Pattern imp = this.lastImpulse()
+        bool cyc = this.setupKind == 6 and not na(lp) and not na(imp) and lp.kind == 2 and lp.startTime == imp.endTime
+        int d = cyc ? imp.dir : this.setupKind == 1 or this.setupKind == 2 or this.setupKind == 5 ? this.bias : 0
+        if d != 0
+            int hd = hi.bias != 0 ? hi.bias : hi.candDir
+            this.fracTxt := "Fraktal: " + (hd == 0 ? "belum terbaca" : hd == d ? "cocok" : "berbeda") + " dengan " + hi.name + " " + hi.tfText +
+                 (hd == 0 ? "" : " (" + f_dirTxt(hd) + ")")
+    this
+
+// Keeps projection lines, labels and boxes ending to the right of the last candle.
+method extendProj(Layer this) =>
+    int xR = f_projRight()
+    for ln in this.projLines
+        ln.set_x2(xR)
+    for lb in this.projLabels
+        lb.set_x(xR)
+    for bx in this.projBoxes
+        bx.set_right(xR)
+    this.layoutPath()
+    this
+
+// Runs at every close of the layer's own timeframe (c, h, l): wave 3 trigger,
+// target and invalidation. A higher timeframe count is never judged on a chart candle.
+method monitor(Layer this, float c, float h, float l) =>
+    if this.setupKind != 0
+        if this.setupKind == 1 and not this.triggerFired and (c - this.trigger) * this.bias > 0
+            this.triggerFired := true
+            this.evTrigger := this.bias
+        if not this.targetHit and ((this.tgtDir == 1 and h >= this.target) or (this.tgtDir == -1 and l <= this.target))
+            this.targetHit := true
+            this.evTarget := this.setupKind != 8
+            this.state := this.state + ", target tercapai"
+        int dRef = this.bias != 0 ? this.bias : this.candDir
+        if (c - this.inv) * dRef < 0
+            this.evInvalid := this.setupKind != 8
+            this.invHit := this.inv
+            this.state := "Hitungan batal: " + this.state
+            this.setupKind := 0
+            this.candDir := 0
+            this.bias := 0
+            this.inv := na
+            this.target := na
+            this.tgtDir := 0
+            this.clearProj()
+    this
+
+// newData marks a finished bar of the layer's timeframe; c, h and l are that bar's values.
+method step(Layer this, float ph, float pl, int tH, int tL, float osc, bool newData, float c, float h, float l) =>
+    this.resetEvents()
+    bool fresh = false
+    if this.active and barstate.isconfirmed and newData
+        this.px := c
+        // A bar with both pivots whose extremes have known, different times (higher timeframe
+        // layers) feeds both in time order, so neither the extension nor the new swing is lost.
+        // On the chart timeframe both share one time and feed() keeps the opposite pivot only.
+        // One process() call site: each call site adds the method body to the compiled script.
+        bool both = not na(ph) and not na(pl) and tH != tL
+        for k = 0 to (both ? 1 : 0)
+            bool useHi = (k == 0) == (tH < tL)
+            int ev = both ? this.addPivot(useHi ? ph : pl, useHi ? tH : tL, useHi ? 1 : -1, osc) : this.feed(ph, pl, tH, tL, osc)
+            if ev != 0
+                this.process(ev)
+                fresh := true
+    // The count is rebuilt after new pivots. On the last bar, a count rebuilt earlier without
+    // drawings is rebuilt once more to draw it: pivots and patterns have not changed, so the
+    // count is the same, and the trigger and target flags monitor() set since then are kept.
+    if barstate.islast
+        this.live := true
+    bool redraw = barstate.islast and this.renderPending and not fresh
+    if redraw
+        this.renderPending := false
+    if fresh or (redraw and this.setupKind != 0)
+        string st = this.state
+        bool fired = this.triggerFired
+        bool hit = this.targetHit
+        if not fresh
+            this.clearProj()
+        this.swingTxt := this.swingCount()
+        this.updateState()
+        if not fresh
+            this.state := st
+            this.triggerFired := fired
+            this.targetHit := hit
+    if this.active and barstate.isconfirmed and newData
+        this.monitor(c, h, l)
+    this
+
+method sendAlerts(Layer this) =>
+    if alertsOn and this.active
+        string pre = syminfo.ticker + " " + this.name + " " + this.tfText + ": "
+        if this.evImpulse != 0
+            alert(pre + "impuls " + f_dirTxt(this.evImpulse) + " selesai, skor " + str.tostring(this.score, "#") +
+                 (this.evDiv ? ", divergensi momentum" : "") + (this.evEndDiag ? ", diagonal akhir" : "") + ", fase koreksi A-B-C diperkirakan", alert.freq_once_per_bar_close)
+        if this.evCorr != 0
+            alert(pre + "koreksi selesai, tren " + f_dirTxt(this.evCorr) + " berpotensi berlanjut" +
+                 (na(this.setupScore) ? "" : ", skor " + str.tostring(this.setupScore, "#")) + ". Invalidasi " + f_fmt(this.inv), alert.freq_once_per_bar_close)
+        if this.evTri
+            alert(pre + this.state, alert.freq_once_per_bar_close)
+        if this.evTrigger != 0
+            alert(pre + "breakout gelombang 3 " + f_dirTxt(this.evTrigger) + ". Stop " + f_fmt(this.stopRef) + ", target " + f_fmt(this.target), alert.freq_once_per_bar_close)
+        if this.evTarget
+            alert(pre + "target proyeksi tercapai (" + f_fmt(this.target) + ")", alert.freq_once_per_bar_close)
+        if this.evInvalid
+            alert(pre + "hitungan gelombang batal di " + f_fmt(this.invHit), alert.freq_once_per_bar_close)
+    this
+
+method dashRow(Layer this, table t, int r, string sz) =>
+    color fg = chart.fg_color
+    string st = not this.active ? "Nonaktif, atau tidak di atas timeframe chart" : this.state + (this.fracTxt == "" ? "" : ". " + this.fracTxt)
+    string biasTxt = this.bias == 1 ? "Naik" : this.bias == -1 ? "Turun" : "Netral"
+    color biasCol = this.bias == 1 ? colUp : this.bias == -1 ? colDn : color.new(colInv, 40)
+    t.cell(0, r, this.name, text_color = f_txt(this.col), text_size = sz, text_halign = text.align_left)
+    t.cell(1, r, this.tfText, text_color = fg, text_size = sz)
+    t.cell(2, r, st, text_color = fg, text_size = sz, text_halign = text.align_left)
+    t.cell(3, r, biasTxt, text_color = color.white, bgcolor = biasCol, text_size = sz)
+    t.cell(4, r, this.active ? this.swingTxt : "-", text_color = fg, text_size = sz,
+         tooltip = "Jumlah swing yang sudah terkonfirmasi sejak titik tertinggi atau terendah di dalam rentang pivot. Swing yang masih berjalan belum dihitung. 3, 7, 11: urutan korektif (koreksi bisa selesai). 5, 9, 13: urutan motif (tren cenderung berlanjut).")
+    t.cell(5, r, na(this.score) ? "-" : str.tostring(this.score, "#"), text_color = fg, text_size = sz)
+    t.cell(6, r, f_fmt(this.inv), text_color = fg, text_size = sz)
+    t.cell(7, r, f_fmt(this.target) + (this.tgtConf == "" ? "" : " ★"), text_color = fg, text_size = sz,
+         tooltip = this.tgtConf == "" ? "" : "Target berkonfluensi dengan " + this.tgtConf)
+    this
+
+// -- Data ----------------------------------------------------------------
+float rsiV = ta.rsi(close, rsiLen)
+float ph1 = ta.pivothigh(high, pLen1, pLen1)
+float pl1 = ta.pivotlow(low, pLen1, pLen1)
+float ph2 = ta.pivothigh(high, pLen2, pLen2)
+float pl2 = ta.pivotlow(low, pLen2, pLen2)
+// One request per higher timeframe carries the wave pivots and the order block / supply and demand scan.
+[ph3, pl3, t3, o3, atr3, cls3, his3, los3, p3ObD, p3ObT, p3ObB, p3ObTm, p3ObF, p3SdD, p3SdT, p3SdB, p3SdTm] = request.security(dataTicker, tf3,
+     htfAll(pLen3, rsiLen, swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr), lookahead = barmerge.lookahead_on)
+[ph4, pl4, t4, o4, atr4, cls4, his4, los4, p4ObD, p4ObT, p4ObB, p4ObTm, p4ObF, p4SdD, p4SdT, p4SdB, p4SdTm] = request.security(dataTicker, tf4,
+     htfAll(pLen4, rsiLen, swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr), lookahead = barmerge.lookahead_on)
+bool new3 = timeframe.change(tf3)
+bool new4 = timeframe.change(tf4)
+[keys3, hiT3, loT3] = extremeTimes(tf3, pLen3 + 4)
+[keys4, hiT4, loT4] = extremeTimes(tf4, pLen4 + 4)
+
+// One constructor, so the four degrees do not repeat the array setup.
+f_newLayer(string name, string tag, string tfText, int deg, color col, bool active, bool show, bool proj) =>
+    Layer.new(name = name, tag = tag, tfText = tfText, deg = deg, col = col, active = active, show = show, proj = proj,
+         pivots = array.new<Pivot>(), patterns = array.new<Pattern>(), projLines = array.new<line>(), projLabels = array.new<label>(), projBoxes = array.new<box>(),
+         path = array.new<PathLeg>(), devLines = array.new<line>(), devLabels = array.new<label>(), devDirs = array.new<int>(), devBase = array.new<string>(),
+         projTexts = array.new<string>(), projCols = array.new<color>(), shelf = array.new<Pattern>())
+
+var Layer L1 = f_newLayer("Minor", "Minor", f_tfLabel(timeframe.period), 0, col1, ewOn and en1, show1, proj1)
+var Layer L2 = f_newLayer("Major", "Major", f_tfLabel(timeframe.period), 1, col2, ewOn and en2, show2, proj2)
+var Layer L3 = f_newLayer("TF besar 1", f_tfLabel(tf3), f_tfLabel(tf3), 2, col3, ewOn and act3, show3, proj3)
+var Layer L4 = f_newLayer("TF besar 2", f_tfLabel(tf4), f_tfLabel(tf4), 3, col4, ewOn and act4, show4, proj4)
+// Methods are called through this array: each call site of a method adds its whole body
+// to the compiled script, and calling them once per degree exceeded the token limit.
+var array<Layer> layers = array.from(L1, L2, L3, L4)
+
+// -- Engine --------------------------------------------------------------
+// The extreme lookup only runs on the bar that delivers a pivot.
+bool piv3 = new3 and (not na(ph3) or not na(pl3))
+bool piv4 = new4 and (not na(ph4) or not na(pl4))
+array<float> inPh = array.from(ph1, ph2, ph3, ph4)
+array<float> inPl = array.from(pl1, pl2, pl3, pl4)
+array<int> inTH = array.from(time[pLen1], time[pLen2], piv3 ? f_extremeTime(keys3, hiT3, t3) : t3, piv4 ? f_extremeTime(keys4, hiT4, t4) : t4)
+array<int> inTL = array.from(time[pLen1], time[pLen2], piv3 ? f_extremeTime(keys3, loT3, t3) : t3, piv4 ? f_extremeTime(keys4, loT4, t4) : t4)
+array<float> inOsc = array.from(rsiV[pLen1], rsiV[pLen2], o3, o4)
+array<bool> inNew = array.from(true, true, new3, new4)
+array<float> inC = array.from(close, close, cls3, cls4)
+array<float> inH = array.from(high, high, his3, his4)
+array<float> inL = array.from(low, low, los3, los4)
+for [i, ly] in layers
+    ly.step(inPh.get(i), inPl.get(i), inTH.get(i), inTL.get(i), inOsc.get(i), inNew.get(i), inC.get(i), inH.get(i), inL.get(i))
+// The alternative scenario is drawn on the signal degree. When that degree has none (no
+// count, or projection off), it falls back to the first of the Major, higher timeframe 1,
+// higher timeframe 2 and Minor degrees that has one. With "Semua derajat", every degree draws it.
+if barstate.islast
+    for ly in layers
+        ly.clearAlt()
+    for [i, ly] in layers
+        Layer hi = na
+        if i < 3
+            for j = i + 1 to 3
+                if na(hi) and layers.get(j).active
+                    hi := layers.get(j)
+        ly.fractalCheck(hi)
+    int altIdx = sigDeg == "Minor" ? 0 : 1
+    if not layers.get(altIdx).canAlt()
+        altIdx := L2.canAlt() ? 1 : L3.canAlt() ? 2 : L4.canAlt() ? 3 : 0
+    for [i, ly] in layers
+        if altScope == "Semua derajat" or i == altIdx
+            ly.drawAlt()
+        ly.extendProj()
+
+// -- Elliott Wave: time cycle --------------------------------------------
+// Cycle boundaries every cycMonths from the anchor (default 48 months from January 2023,
+// the Bitcoin 4-year cycle). The next boundary is the estimated time of the next cycle low.
+// Months are counted in UTC; the day is capped at 28 so every month has it.
+int cycBase = year(cycAnchor, "UTC") * 12 + month(cycAnchor, "UTC") - 1
+int cycDay = math.min(dayofmonth(cycAnchor, "UTC"), 28)
+
+f_cycleTime(int k) =>
+    int tm = cycBase + k * cycMonths
+    timestamp("UTC", int(math.floor(tm / 12)), tm % 12 + 1, cycDay, 0, 0)
+
+var array<line> cycLines = array.new<line>()
+var array<label> cycLabels = array.new<label>()
+int cycStart = na
+int cycNext = na
+if ewOn and cycOn and barstate.islast
+    while cycLines.size() > 0
+        cycLines.pop().delete()
+    while cycLabels.size() > 0
+        cycLabels.pop().delete()
+    int kNow = int(math.floor((year(time, "UTC") * 12 + month(time, "UTC") - 1 - cycBase) / cycMonths))
+    if time < f_cycleTime(kNow)
+        kNow -= 1
+    cycStart := f_cycleTime(kNow)
+    cycNext := f_cycleTime(kNow + 1)
+    for j = kNow - 2 to kNow + 1
+        int tc = f_cycleTime(j)
+        bool nxt = j == kNow + 1
+        cycLines.push(line.new(tc, close, tc, close * 1.01, xloc = xloc.bar_time, extend = extend.both,
+             color = color.new(colInv, nxt ? 15 : 55), style = nxt ? line.style_dashed : line.style_dotted, width = nxt ? 2 : 1))
+        if j >= kNow
+            cycLabels.push(label.new(tc, high, (nxt ? "Perkiraan dasar siklus\n" : "Awal siklus\n") + str.format_time(tc, "MMM yyyy", "UTC"),
+                 xloc = xloc.bar_time, style = label.style_label_down, color = color.new(colInv, 100), textcolor = f_txt(colInv), size = size.small,
+                 tooltip = "Siklus " + str.tostring(cycMonths) + " bulan dari " + str.format_time(cycAnchor, "MMM yyyy", "UTC") +
+                 ". Batas siklus adalah perkiraan waktu dasar siklus, bukan level harga. Cocokkan dengan hitungan gelombang derajat besar: dasar siklus yang jatuh di akhir gelombang C atau 2 memperkuat skenario tersebut."))
+
+// -- Confluence: moving averages -----------------------------------------
+f_ma(int len) =>
+    float e = ta.ema(close, len)
+    float m = ta.sma(close, len)
+    maType == "EMA" ? e : m
+
+float ma1 = f_ma(ma1Len)
+float ma2 = f_ma(ma2Len)
+float ma3 = f_ma(ma3Len)
+pMa1 = plot(showMa ? ma1 : na, "MA cepat", color = color.new(#00bcd4, 10), linewidth = 1)
+pMa2 = plot(showMa ? ma2 : na, "MA tengah", color = color.new(#ff9800, 0), linewidth = 2)
+plot(showMa ? ma3 : na, "MA lambat", color = color.new(chart.fg_color, 15), linewidth = 2)
+fill(pMa1, pMa2, color = showMa and maFill ? (ma1 > ma2 ? color.new(colUp, 90) : color.new(colDn, 90)) : na, title = "Arsir MA cepat dan tengah")
+
+// -- Confluence: support and resistance ----------------------------------
+var array<Zone> zC = array.new<Zone>()
+var array<Zone> z3 = array.new<Zone>()
+var array<Zone> z4 = array.new<Zone>()
+float srPh = ta.pivothigh(high, srLen, srLen)
+float srPl = ta.pivotlow(low, srLen, srLen)
+float atrSr = atrV[srLen]
+int timeSr = time[srLen]
+if showSr and barstate.isconfirmed
+    f_feedZones(zC, srPh, srPl, atrSr, timeSr, L1.tfText)
+    if srUseHtf and act3 and new3
+        f_feedZones(z3, ph3, pl3, atr3, t3, L3.tfText)
+    if srUseHtf and act4 and new4
+        f_feedZones(z4, ph4, pl4, atr4, t4, L4.tfText)
+    f_roles(zC, atrV * srThick)
+    f_roles(z3, atr3 * srThick)
+    f_roles(z4, atr4 * srThick)
+
+float nearRes = na
+float nearSup = na
+float resHalf = na
+float supHalf = na
+if showSr
+    [r1, s1, rh1, sh1] = f_nearest(zC, atrV * srThick, na, na, na, na)
+    // z3 and z4 are only fed while srUseHtf is on, so they are empty otherwise.
+    [r2, s2, rh2, sh2] = f_nearest(z3, atr3 * srThick, r1, s1, rh1, sh1)
+    [r3, s3, rh3, sh3] = f_nearest(z4, atr4 * srThick, r2, s2, rh2, sh2)
+    nearRes := r3
+    nearSup := s3
+    resHalf := rh3
+    supHalf := sh3
+
+bool srDisplace = math.abs(close - open) >= nz(atrV[1]) * 0.8
+bool srBreakUp = showSr and barstate.isconfirmed and srDisplace and close > open and not na(nearRes[1]) and close > nearRes[1] + nz(resHalf[1]) and close[1] <= nearRes[1] + nz(resHalf[1])
+bool srBreakDown = showSr and barstate.isconfirmed and srDisplace and close < open and not na(nearSup[1]) and close < nearSup[1] - nz(supHalf[1]) and close[1] >= nearSup[1] - nz(supHalf[1])
+plotshape(showSrBreak and srBreakUp, "S/R tembus naik", shape.triangleup, location.belowbar, color.new(colRes, 0), text = "TEMBUS R", textcolor = color.new(colRes, 0), size = size.tiny)
+plotshape(showSrBreak and srBreakDown, "S/R tembus turun", shape.triangledown, location.abovebar, color.new(colSup, 0), text = "TEMBUS S", textcolor = color.new(colSup, 0), size = size.tiny)
+
+var array<box> srBoxes = array.new<box>()
+var array<label> srTags = array.new<label>()
+if showSr and barstate.islast
+    while srBoxes.size() > 0
+        srBoxes.pop().delete()
+    while srTags.size() > 0
+        srTags.pop().delete()
+    array<SrCand> cands = array.new<SrCand>()
+    if srUseHtf
+        f_collect(cands, z4, atr4 * srThick)
+        f_collect(cands, z3, atr3 * srThick)
+    f_collect(cands, zC, atrV * srThick)
+    for side = 0 to 1
+        bool above = side == 0
+        for pick = 1 to srEach
+            int best = -1
+            float bestD = na
+            if cands.size() > 0
+                for j = 0 to cands.size() - 1
+                    SrCand cj = cands.get(j)
+                    if not cj.used and (above ? cj.role == -1 : cj.role == 1)
+                        float dd = math.abs(cj.price - close)
+                        if na(bestD) or dd < bestD
+                            bestD := dd
+                            best := j
+            if best >= 0
+                SrCand cb = cands.get(best)
+                cb.used := true
+                color base = above ? colRes : colSup
+                srBoxes.push(box.new(cb.born, cb.price + cb.half, time, cb.price - cb.half, xloc = xloc.bar_time, extend = extend.right,
+                     border_color = color.new(base, 40), bgcolor = color.new(base, 82)))
+                srTags.push(label.new(time + 3 * barMs, cb.price, (above ? "RESISTANSI | " : "SUPPORT | ") + cb.txt, xloc = xloc.bar_time,
+                     style = label.style_label_left, color = color.new(base, 100), textcolor = f_txt(base), size = size.small))
+
+// -- Confluence: price action and liquidity ------------------------------
+float swH = ta.pivothigh(high, swingLen, swingLen)
+float swL = ta.pivotlow(low, swingLen, swingLen)
+float liqRecentHigh = ta.highest(high, swingLen)
+float liqRecentLow = ta.lowest(low, swingLen)
+float atrSw = atrV[swingLen]
+int timeSw = time[swingLen]
+var float lastSwH = na
+var float lastSwL = na
+var int lastSwHBar = na
+var int lastSwLBar = na
+var bool swHBroken = false
+var bool swLBroken = false
+var int msTrend = 0
+var string msEvent = "-"
+var array<line> msLines = array.new<line>()
+var array<label> msLabels = array.new<label>()
+var array<label> swingTags = array.new<label>()
+var array<LiqLevel> liqLevels = array.new<LiqLevel>()
+var array<line> sweepLines = array.new<line>()
+
+// Liquidity is updated before the swing references so EQH / EQL compare with the previous swing.
+if showLiq and barstate.isconfirmed
+    int nL = liqLevels.size()
+    if nL > 0
+        for i = nL - 1 to 0
+            LiqLevel lv = liqLevels.get(i)
+            if lv.buySide ? high >= lv.price : low <= lv.price
+                lv.ln.delete()
+                lv.tag.delete()
+                liqLevels.remove(i)
+    float eqTol = nz(atrSw) * eqAtr
+    if not na(swH) and liqRecentHigh < swH
+        bool eqH = not na(lastSwH) and math.abs(swH - lastSwH) <= eqTol
+        color tint = colDn
+        LiqLevel lv = LiqLevel.new(swH, true, eqH, na, na)
+        lv.ln := line.new(timeSw, swH, time, swH, xloc = xloc.bar_time, extend = extend.right, color = color.new(tint, 30), style = line.style_dotted)
+        lv.tag := label.new(time, swH, f_liqText(lv), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(tint, 100), textcolor = f_txt(tint), size = size.tiny)
+        liqLevels.push(lv)
+    if not na(swL) and liqRecentLow > swL
+        bool eqL = not na(lastSwL) and math.abs(swL - lastSwL) <= eqTol
+        color tint = colUp
+        LiqLevel lv = LiqLevel.new(swL, false, eqL, na, na)
+        lv.ln := line.new(timeSw, swL, time, swL, xloc = xloc.bar_time, extend = extend.right, color = color.new(tint, 30), style = line.style_dotted)
+        lv.tag := label.new(time, swL, f_liqText(lv), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(tint, 100), textcolor = f_txt(tint), size = size.tiny)
+        liqLevels.push(lv)
+    while liqLevels.size() > maxLiq
+        LiqLevel old = liqLevels.shift()
+        old.ln.delete()
+        old.tag.delete()
+if showLiq and barstate.islast
+    for lv in liqLevels
+        lv.tag.set_x(time + 3 * barMs)
+        lv.tag.set_y(lv.price)
+        lv.tag.set_text(f_liqText(lv))
+        lv.tag.set_textcolor(f_txt(lv.buySide ? colDn : colUp))
+
+if not na(swH)
+    if showSwingTags and not na(lastSwH)
+        swingTags.push(label.new(bar_index - swingLen, swH, swH > lastSwH ? "HH" : "LH", style = label.style_label_down, color = color.new(colDn, 100), textcolor = f_txt(colDn), size = size.tiny))
+    lastSwH := swH
+    lastSwHBar := bar_index - swingLen
+    swHBroken := false
+if not na(swL)
+    if showSwingTags and not na(lastSwL)
+        swingTags.push(label.new(bar_index - swingLen, swL, swL > lastSwL ? "HL" : "LL", style = label.style_label_up, color = color.new(colUp, 100), textcolor = f_txt(colUp), size = size.tiny))
+    lastSwL := swL
+    lastSwLBar := bar_index - swingLen
+    swLBroken := false
+while swingTags.size() > 40
+    swingTags.shift().delete()
+
+bool bullBreak = barstate.isconfirmed and not na(lastSwH) and not swHBroken and close > lastSwH
+bool bearBreak = barstate.isconfirmed and not na(lastSwL) and not swLBroken and close < lastSwL
+bool bullChoch = bullBreak and msTrend == -1
+bool bearChoch = bearBreak and msTrend == 1
+// A sweep trades through the swing but closes back inside it (stop run).
+bool bullSweep = barstate.isconfirmed and not na(lastSwL) and not swLBroken and low < lastSwL and close > lastSwL
+bool bearSweep = barstate.isconfirmed and not na(lastSwH) and not swHBroken and high > lastSwH and close < lastSwH
+
+// The arrow joins the swept swing wick to the candle that swept it; a dot plotted at
+// the tip of the sweeping wick marks the candle. A plotted circle stays a few pixels
+// wide, while the smallest label circle covers the candle.
+if showSweep and bullSweep
+    sweepLines.push(line.new(lastSwLBar, lastSwL, bar_index, lastSwL, color = color.new(colSweepLow, 20), style = line.style_arrow_right, width = 1))
+if showSweep and bearSweep
+    sweepLines.push(line.new(lastSwHBar, lastSwH, bar_index, lastSwH, color = color.new(colSweepHigh, 20), style = line.style_arrow_right, width = 1))
+while sweepLines.size() > maxSweep
+    sweepLines.shift().delete()
+plotshape(showSweep and bullSweep ? low : na, "Titik sweep low", shape.circle, location.absolute, color.new(colSweepLow, 0), size = size.tiny, display = display.pane)
+plotshape(showSweep and bearSweep ? high : na, "Titik sweep high", shape.circle, location.absolute, color.new(colSweepHigh, 0), size = size.tiny, display = display.pane)
+
+if bullBreak
+    if showStructure
+        msLines.push(line.new(lastSwHBar, lastSwH, bar_index, lastSwH, color = color.new(colUp, 30), style = bullChoch ? line.style_solid : line.style_dashed))
+        msLabels.push(label.new(math.round((lastSwHBar + bar_index) / 2), lastSwH, bullChoch ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(colUp, 100), textcolor = f_txt(colUp), size = size.tiny))
+    msTrend := 1
+    msEvent := bullChoch ? "CHoCH naik" : "BOS naik"
+    swHBroken := true
+if bearBreak
+    if showStructure
+        msLines.push(line.new(lastSwLBar, lastSwL, bar_index, lastSwL, color = color.new(colDn, 30), style = bearChoch ? line.style_solid : line.style_dashed))
+        msLabels.push(label.new(math.round((lastSwLBar + bar_index) / 2), lastSwL, bearChoch ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(colDn, 100), textcolor = f_txt(colDn), size = size.tiny))
+    msTrend := -1
+    msEvent := bearChoch ? "CHoCH turun" : "BOS turun"
+    swLBroken := true
+while msLines.size() > 30
+    msLines.shift().delete()
+while msLabels.size() > 30
+    msLabels.shift().delete()
+if bullSweep
+    msEvent := "sweep low"
+if bearSweep
+    msEvent := "sweep high"
+
+alertcondition(bullChoch, "PA CHoCH naik", "CHoCH naik di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(bearChoch, "PA CHoCH turun", "CHoCH turun di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(bullSweep, "Liquidity sweep low", "Liquidity sweep low di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(bearSweep, "Liquidity sweep high", "Liquidity sweep high di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(srBreakUp, "Resistansi tertembus", "Resistansi tertembus di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(srBreakDown, "Support tertembus", "Support tertembus di {{ticker}} {{interval}} pada {{close}}")
+
+// -- Confluence: order blocks, supply / demand and fair value gaps -------
+[pcObD, pcObT, pcObB, pcObTm, pcObF, pcSdD, pcSdT, pcSdB, pcSdTm] = paScan(swingLen, obLookback, sdImpulseAtr, sdBaseBody, sdBaseMax, 14, obDispAtr, obMaxAtr)
+// The higher timeframe scans (p3*, p4*) come with the wave data in the Data section.
+
+var array<PaZone> obZones = array.new<PaZone>()
+var array<PaZone> sdZones = array.new<PaZone>()
+if barstate.isconfirmed
+    updatePaZones(obZones)
+    updatePaZones(sdZones)
+
+// Adds the zones one source found on this bar. rank: 0 chart, 1 HTF 1, 2 HTF 2.
+// htfBias is the Elliott Wave bias of the next higher degree, used for the fifth quality point.
+// Returns the direction of a new order block and of a new supply / demand zone (0 = none).
+f_addPa(int rank, string tag, int htfBias, int obD0, float obT, float obB, int obTm, int obF, int sdD0, float sdT, float sdB, int sdTm) =>
+    int obD = nz(obD0)
+    int sdD = nz(sdD0)
+    int newOb = 0
+    int newSd = 0
+    if showOb and obD != 0 and not overlapsActive(obZones, obD, obT, obB, rank)
+        pushPaZone(obZones, obTm, obT, obB, obD, obD == 1 ? colObBull : colObBear, line.style_solid, math.min(rank + 1, 3), 85, tag + (obD == 1 ? " OB naik" : " OB turun"), rank, maxOb)
+        int flags = nz(obF)
+        PaZone added = obZones.last()
+        added.quality := (flags % 2) + (math.floor(flags / 2) % 2) + (math.floor(flags / 4) % 2) + (math.floor(flags / 8) % 2) + (obD == htfBias ? 1 : 0)
+        newOb := obD
+    if showSd and sdD != 0 and not overlapsActive(sdZones, sdD, sdT, sdB, rank)
+        pushPaZone(sdZones, sdTm, sdT, sdB, sdD, sdD == 1 ? colDemand : colSupply, line.style_dashed, rank >= 2 ? 2 : 1, 93, tag + (sdD == 1 ? " demand" : " supply"), rank, maxSd)
+        newSd := sdD
+    [newOb, newSd]
+
+int newObDir = 0
+int newSdDir = 0
+if paChart and barstate.isconfirmed
+    [o0, s0] = f_addPa(0, L1.tfText, L3.active ? L3.bias : 0, pcObD, pcObT, pcObB, pcObTm, pcObF, pcSdD, pcSdT, pcSdB, pcSdTm)
+    newObDir := o0 != 0 ? o0 : newObDir
+    newSdDir := s0 != 0 ? s0 : newSdDir
+if paTf3 and act3 and new3 and barstate.isconfirmed
+    [o1, s1z] = f_addPa(1, L3.tfText, L4.active ? L4.bias : 0, p3ObD, p3ObT, p3ObB, p3ObTm, p3ObF, p3SdD, p3SdT, p3SdB, p3SdTm)
+    newObDir := o1 != 0 ? o1 : newObDir
+    newSdDir := s1z != 0 ? s1z : newSdDir
+if paTf4 and act4 and new4 and barstate.isconfirmed
+    [o2, s2z] = f_addPa(2, L4.tfText, 0, p4ObD, p4ObT, p4ObB, p4ObTm, p4ObF, p4SdD, p4SdT, p4SdB, p4SdTm)
+    newObDir := o2 != 0 ? o2 : newObDir
+    newSdDir := s2z != 0 ? s2z : newSdDir
+
+// Fair value gaps: three-candle imbalance, removed once price fills it.
+gapBox(Gap g) =>
+    color base = g.bull ? colUp : colDn
+    box.new(math.max(g.left, bar_index - 4999), g.top, bar_index, g.bot, border_color = color.new(base, 70), bgcolor = color.new(base, 90))
+
+var array<Gap> gaps = array.new<Gap>()
+bool bullFvg = barstate.isconfirmed and not na(atrV) and low > high[2] and low - high[2] >= atrV * fvgMinAtr
+bool bearFvg = barstate.isconfirmed and not na(atrV) and high < low[2] and low[2] - high >= atrV * fvgMinAtr
+if showFvg and barstate.isconfirmed
+    int gn = gaps.size()
+    if gn > 0
+        for i = gn - 1 to 0
+            Gap g = gaps.get(i)
+            bool filled = g.bull ? low <= g.bot : high >= g.top
+            if filled
+                g.b.delete()
+                gaps.remove(i)
+            else
+                if g.bull ? low <= g.top : high >= g.bot
+                    g.depth := math.max(nz(g.depth), penetration(g.top, g.bot, g.bull))
+                g.b.set_right(bar_index)
+    if bullFvg
+        Gap g = Gap.new(na, low, high[2], true, left = bar_index - 2)
+        g.b := gapBox(g)
+        gaps.push(g)
+    if bearFvg
+        Gap g = Gap.new(na, low[2], high, false, left = bar_index - 2)
+        g.b := gapBox(g)
+        gaps.push(g)
+    while gaps.size() > maxFvg
+        Gap old = gaps.shift()
+        old.b.delete()
+
+// Captions go to the label column right of the last candle, never inside the boxes over the candles.
+var int firstBarTime = time
+var array<label> paCaps = array.new<label>()
+if barstate.islast
+    while paCaps.size() > 0
+        paCaps.pop().delete()
+    array<bool> obVis = showNearestZones(obZones, paEach, obMinQuality)
+    array<bool> sdVis = showNearestZones(sdZones, paEach, 0)
+    for [i, z] in obZones
+        if z.active
+            placePaZone(z, obVis.get(i), firstBarTime)
+            if obVis.get(i)
+                paCaps.push(label.new(time + 3 * barMs, (z.b.get_top() + z.b.get_bottom()) / 2, zoneCaption(z), xloc = xloc.bar_time,
+                     style = label.style_label_left, color = color.new(z.c, 100), textcolor = f_txt(z.c), size = size.tiny))
+    for [i, z] in sdZones
+        if z.active
+            placePaZone(z, sdVis.get(i), firstBarTime)
+            if sdVis.get(i)
+                paCaps.push(label.new(time + 3 * barMs, (z.b.get_top() + z.b.get_bottom()) / 2, zoneCaption(z), xloc = xloc.bar_time,
+                     style = label.style_label_left, color = color.new(z.c, 100), textcolor = f_txt(z.c), size = size.tiny))
+    // Only the nearest open gap above and below price gets a caption.
+    int gUp = -1
+    int gDn = -1
+    for [i, g] in gaps
+        g.b.set_right(bar_index)
+        if g.bot > close and (gUp < 0 or g.bot < gaps.get(gUp).bot)
+            gUp := i
+        if g.top < close and (gDn < 0 or g.top > gaps.get(gDn).top)
+            gDn := i
+    for gi in array.from(gUp, gDn)
+        if gi >= 0
+            Gap g = gaps.get(gi)
+            color gc = g.bull ? colUp : colDn
+            paCaps.push(label.new(time + 3 * barMs, (g.top + g.bot) / 2, "FVG " + (g.bull ? "naik" : "turun") + " | " + mitigationText(g.depth), xloc = xloc.bar_time,
+                 style = label.style_label_left, color = color.new(gc, 100), textcolor = f_txt(gc), size = size.tiny))
+
+alertcondition(newObDir == 1, "OB naik baru", "Order block naik baru di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(newObDir == -1, "OB turun baru", "Order block turun baru di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(newSdDir == 1, "Demand baru", "Zona demand baru di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(newSdDir == -1, "Supply baru", "Zona supply baru di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(showFvg and bullFvg, "FVG naik", "FVG naik baru di {{ticker}} {{interval}} pada {{close}}")
+alertcondition(showFvg and bearFvg, "FVG turun", "FVG turun baru di {{ticker}} {{interval}} pada {{close}}")
+
+// -- Signals -------------------------------------------------------------
+Layer sigL = sigDeg == "Minor" ? L1 : L2
+int htfBias = (L3.active ? L3.bias : 0) + (L4.active ? L4.bias : 0)
+bool buyOk = htfFilter == "Mati" or (htfFilter == "Tidak berlawanan" and htfBias >= 0) or (htfFilter == "Ketat" and htfBias > 0)
+bool sellOk = htfFilter == "Mati" or (htfFilter == "Tidak berlawanan" and htfBias <= 0) or (htfFilter == "Ketat" and htfBias < 0)
+
+// Reward / risk from the signal close; na when the stop or target is missing.
+f_rr(float stop, float tgt) =>
+    float risk = math.abs(close - stop)
+    risk > 0 and not na(tgt) ? math.abs(tgt - close) / risk : na
+
+// Signal quality, one point each: the higher timeframe bias agrees; the nearest opposing
+// support / resistance lies at least one stop distance away and RSI is not stretched in the
+// signal direction; the pattern score (wave 2 for W3, the correction for KOREKSI) is 60 or more.
+f_grade(bool up, float stop, float sc) =>
+    float risk = math.abs(close - stop)
+    float wall = up ? nearRes : nearSup
+    bool room = na(wall) or (wall - close) * (up ? 1 : -1) >= risk
+    bool rsiOk = na(rsiV) or (up ? rsiV < 70 : rsiV > 30)
+    ((up ? htfBias > 0 : htfBias < 0) ? 1 : 0) + (room and rsiOk ? 1 : 0) + (not na(sc) and sc >= 60 ? 1 : 0)
+
+f_sigOk(float rr, int grade) =>
+    (minRR <= 0 or (not na(rr) and rr >= minRR)) and grade >= minGrade
+
+int sigDir = sigL.evTrigger != 0 ? sigL.evTrigger : sigL.evCorr
+float sigStop = sigL.evTrigger != 0 ? sigL.stopRef : sigL.inv
+float sigRR = sigDir != 0 ? f_rr(sigStop, sigL.target) : na
+int sigGrade = sigDir != 0 ? f_grade(sigDir == 1, sigStop, sigL.setupScore) : 0
+bool sigPass = sigDir != 0 and f_sigOk(sigRR, sigGrade)
+bool buyW3 = showW3 and sigL.evTrigger == 1 and buyOk and sigPass
+bool sellW3 = showW3 and sigL.evTrigger == -1 and sellOk and sigPass
+bool buyC = showCSig and sigL.evCorr == 1 and sigL.evTrigger == 0 and buyOk and sigPass
+bool sellC = showCSig and sigL.evCorr == -1 and sigL.evTrigger == 0 and sellOk and sigPass
+bool exhTop = showExh and sigL.evImpulse == 1 and (sigL.evDiv or sigL.evEndDiag)
+bool exhBottom = showExh and sigL.evImpulse == -1 and (sigL.evDiv or sigL.evEndDiag)
+
+var array<label> sigLabels = array.new<label>()
+
+f_signal(bool up, string txt, string setup, float stop, float tgt, color c) =>
+    float rr = f_rr(stop, tgt)
+    string tip = (up ? "Beli, " : "Jual, ") + setup + "\nMasuk: " + f_fmt(close) + "\nStop: " + f_fmt(stop) +
+         "\nTarget: " + f_fmt(tgt) + "\nRasio reward / risk: " + f_ratio(rr) +
+         "\nKualitas: " + str.tostring(sigGrade) + " dari 3" + "\nSkor pola: " + (na(sigL.setupScore) ? "-" : str.tostring(sigL.setupScore, "#"))
+    sigLabels.push(label.new(bar_index, up ? low : high, txt + " " + str.tostring(sigGrade) + "/3", yloc = up ? yloc.belowbar : yloc.abovebar,
+         style = up ? label.style_label_up : label.style_label_down, color = c, textcolor = color.white, size = size.small, tooltip = tip))
+    true
+
+if buyW3
+    f_signal(true, "W3 BELI", "breakout gelombang 3 (" + sigL.name + ")", sigL.stopRef, sigL.target, colUp)
+if sellW3
+    f_signal(false, "W3 JUAL", "breakout gelombang 3 (" + sigL.name + ")", sigL.stopRef, sigL.target, colDn)
+if buyC
+    f_signal(true, "KOREKSI BELI", "koreksi selesai (" + sigL.name + ")", sigL.inv, sigL.target, colUp)
+if sellC
+    f_signal(false, "KOREKSI JUAL", "koreksi selesai (" + sigL.name + ")", sigL.inv, sigL.target, colDn)
+if exhTop
+    sigLabels.push(label.new(bar_index, high, "AKHIR W5", yloc = yloc.abovebar, style = label.style_label_down, color = colInv,
+         textcolor = color.white, size = size.tiny, tooltip = "Impuls naik selesai dengan divergensi momentum atau diagonal akhir. Risiko pembalikan, bukan sinyal entry."))
+if exhBottom
+    sigLabels.push(label.new(bar_index, low, "AKHIR W5", yloc = yloc.belowbar, style = label.style_label_up, color = colInv,
+         textcolor = color.white, size = size.tiny, tooltip = "Impuls turun selesai dengan divergensi momentum atau diagonal akhir. Risiko pembalikan, bukan sinyal entry."))
+// AKHIR W5 labels share the signal budget, so the cap applies after every push.
+while sigLabels.size() > 60
+    sigLabels.shift().delete()
+
+// -- Caption grouping ----------------------------------------------------
+// Same method as QAE v3: captions whose levels are closer than one caption height
+// merge into one multi-line caption (highest level on the first line). Each caption
+// sits in a column right of its levels, joined to every level by a dotted link, and
+// its tooltip lists each level with its price. Caption height follows the visible
+// price range, so the grouping adapts to the zoom.
+var array<line> capLinks = array.new<line>()
+// Caption chips drawn on this pass (left edge, estimated right edge, centre price, line
+// count), so projection path labels can move off them. The left edge is exact; the width
+// is estimated with one small-size character as 1/190 of the visible time span.
+var array<int> chipL = array.new<int>()
+var array<int> chipR = array.new<int>()
+var array<float> chipY = array.new<float>()
+var array<int> chipN = array.new<int>()
+float charMs = (chart.right_visible_bar_time - chart.left_visible_bar_time) / 190.0
+
+f_maxLineLen(string txt) =>
+    int w = 0
+    for ln in str.split(txt, "\n")
+        w := math.max(w, str.length(ln))
+    w
+var float visHigh = na
+var float visLow = na
+if time >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
+    visHigh := na(visHigh) ? high : math.max(visHigh, high)
+    visLow := na(visLow) ? low : math.min(visLow, low)
+
+f_sameHue(color a, color b) =>
+    color.r(a) == color.r(b) and color.g(a) == color.g(b) and color.b(a) == color.b(b)
+
+f_paTint(string t) =>
+    str.contains(t, "OB naik") ? colObBull : str.contains(t, "OB turun") ? colObBear : str.contains(t, "demand") ? colDemand :
+     str.contains(t, "supply") ? colSupply : str.contains(t, "FVG naik") ? colUp : colDn
+
+f_groupCaptions(array<label> labs, array<float> prices, array<color> tints, float gap, int xFrom, int xCap) =>
+    int cnt = labs.size()
+    if cnt > 0 and gap > 0
+        array<int> ord = prices.sort_indices(order.ascending)
+        array<int> gFirst = array.new<int>()
+        array<int> gSize = array.new<int>()
+        float firstY = na
+        float lastY = na
+        for rank = 0 to cnt - 1
+            float y = prices.get(ord.get(rank))
+            if rank == 0 or y - lastY >= gap or y - firstY > gap * 3
+                gFirst.push(rank)
+                gSize.push(1)
+                firstY := y
+            else
+                gSize.set(gSize.size() - 1, gSize.last() + 1)
+            lastY := y
+        int gCount = gFirst.size()
+        array<label> gLabels = array.new<label>()
+        array<float> anchors = array.new<float>()
+        for g = 0 to gCount - 1
+            int first = gFirst.get(g)
+            int n = gSize.get(g)
+            float anchor = 0.0
+            for rank = first to first + n - 1
+                anchor += prices.get(ord.get(rank))
+            anchor /= n
+            anchors.push(anchor)
+            // The caption of the highest level carries the group; the other members are emptied.
+            int topIdx = ord.get(first + n - 1)
+            label head = labs.get(topIdx)
+            if n == 1
+                head.set_tooltip(head.get_text() + "\nLevel: " + f_fmt(prices.get(topIdx)))
+            else
+                array<string> rows = array.new<string>()
+                array<string> tips = array.new<string>()
+                color tint = tints.get(topIdx)
+                bool oneHue = true
+                for rank = first + n - 1 to first
+                    int idx = ord.get(rank)
+                    label m = labs.get(idx)
+                    rows.push(m.get_text())
+                    tips.push(m.get_text() + "  @ " + f_fmt(prices.get(idx)))
+                    oneHue := oneHue and f_sameHue(tints.get(idx), tint)
+                    if idx != topIdx
+                        m.set_text("")
+                        m.set_tooltip("")
+                        m.set_color(color.new(chart.bg_color, 100))
+                head.set_text(rows.join("\n"))
+                head.set_tooltip(tips.join("\n"))
+                head.set_textcolor(oneHue ? f_txt(tint) : color.new(chart.fg_color, 15))
+            gLabels.push(head)
+        // A caption of n lines is treated as n caption heights tall.
+        array<float> pos = array.new<float>()
+        for g = 0 to gCount - 1
+            float anchor = anchors.get(g)
+            pos.push(g == 0 ? anchor : math.max(anchor, pos.get(g - 1) + gap * (gSize.get(g - 1) + gSize.get(g)) / 2))
+        // Each run of pushed captions is centred on its own levels.
+        int runStart = 0
+        for g = 0 to gCount - 1
+            bool runEnds = g == gCount - 1 or anchors.get(g + 1) >= pos.get(g) + gap * (gSize.get(g) + gSize.get(g + 1)) / 2
+            if runEnds
+                float sh = 0.0
+                for j = runStart to g
+                    sh += pos.get(j) - anchors.get(j)
+                sh /= g - runStart + 1
+                for j = runStart to g
+                    pos.set(j, pos.get(j) - sh)
+                runStart := g + 1
+        // A centred run can drop into the one below it, so restore the minimum gap.
+        if gCount > 1
+            for g = 1 to gCount - 1
+                pos.set(g, math.max(pos.get(g), pos.get(g - 1) + gap * (gSize.get(g - 1) + gSize.get(g)) / 2))
+        for g = 0 to gCount - 1
+            label lab = gLabels.get(g)
+            float py = pos.get(g)
+            lab.set_xloc(xCap, xloc.bar_time)
+            lab.set_y(py)
+            lab.set_style(label.style_label_left)
+            lab.set_textalign(text.align_left)
+            // Solid chip a step lighter (dark chart) or darker (light chart) than the background,
+            // so the caption reads as a box over zones and candles.
+            lab.set_color(f_mix(chart.bg_color, chart.fg_color, 0.14))
+            lab.set_size(size.small)
+            chipL.push(xCap)
+            chipR.push(xCap + math.round((f_maxLineLen(lab.get_text()) + 2) * charMs))
+            chipY.push(py)
+            chipN.push(str.split(lab.get_text(), "\n").size())
+            int first = gFirst.get(g)
+            for rank = first to first + gSize.get(g) - 1
+                capLinks.push(line.new(xFrom, prices.get(ord.get(rank)), xCap, py, xloc = xloc.bar_time,
+                     color = color.new(chart.fg_color, 45), style = line.style_dotted))
+    true
+
+// S/R zone or liquidity level within confPct of price y, as text ("" when none). The S/R
+// zones come from the drawn boxes, whose prices the caption grouping never moves; a level
+// inside a zone counts as distance 0. The nearest match wins.
+f_confWith(float y) =>
+    string res = ""
+    if confOn and not na(y) and y > 0
+        float best = y * confPct / 100
+        for bx in srBoxes
+            float top = bx.get_top()
+            float bot = bx.get_bottom()
+            float d = y >= bot and y <= top ? 0.0 : math.min(math.abs(y - top), math.abs(y - bot))
+            if d <= best
+                best := d
+                float mid = (top + bot) / 2
+                res := (mid > close ? "resistansi " : "support ") + f_fmt(mid)
+        for lv in liqLevels
+            float d = math.abs(lv.price - y)
+            if d <= best
+                best := d
+                res := f_liqText(lv) + " " + f_fmt(lv.price)
+    res
+
+// Projection captions are rebuilt from their stored text, color and line price on every
+// pass and collected from every degree into one caption column. A level that coincides
+// with an S/R zone or liquidity level gets a star and that level.
+method collectProj(Layer this, array<label> lbs, array<float> pr, array<color> cs) =>
+    int n = math.min(this.projLabels.size(), math.min(this.projLines.size(), this.projTexts.size()))
+    if n > 0
+        for i = 0 to n - 1
+            label lb = this.projLabels.get(i)
+            float y = this.projLines.get(i).get_y1()
+            string cf = f_confWith(y)
+            lb.set_text(this.projTexts.get(i) + (cf == "" ? "" : "  ★ " + cf))
+            lb.set_textcolor(f_txt(this.projCols.get(i)))
+            lbs.push(lb)
+            pr.push(y)
+            cs.push(this.projCols.get(i))
+    this
+
+// Wave labels of every degree on the same pivot (same time, price and side) are stacked
+// outwards from the pivot in degree order, and only the label nearest the pivot keeps
+// the price. Rebuilt from the stored base text, so it runs safely on every last-bar pass.
+method collectWave(Layer this, array<label> labs, array<int> dirs, array<string> bases) =>
+    for pt in this.patterns
+        if not na(pt.labDirs)
+            int m = math.min(pt.labels.size(), pt.labDirs.size())
+            if m > 0
+                for i = 0 to m - 1
+                    labs.push(pt.labels.get(i))
+                    dirs.push(pt.labDirs.get(i))
+                    bases.push(pt.labBase.get(i))
+    int nd = math.min(this.devLabels.size(), this.devDirs.size())
+    if nd > 0
+        for i = 0 to nd - 1
+            labs.push(this.devLabels.get(i))
+            dirs.push(this.devDirs.get(i))
+            bases.push(this.devBase.get(i))
+    for g in this.path
+        if not g.hide
+            labs.push(g.lb)
+            dirs.push(g.dir)
+            bases.push(g.base)
+    this
+
+// First chip a label box overlaps (-1 for none). lineH is one small text line in price.
+f_chipHit(int x, float hw, float yBot, float yTop, float lineH) =>
+    int res = -1
+    int nc = chipL.size()
+    if nc > 0
+        for k = 0 to nc - 1
+            float half = (chipN.get(k) + 0.6) * lineH / 2
+            if res < 0 and x + hw > chipL.get(k) and x - hw < chipR.get(k) and yTop > chipY.get(k) - half and yBot < chipY.get(k) + half
+                res := k
+    res
+
+// A projection path label that lands on a caption chip first flips to the other side of
+// its projected point, so it stays on the point. When that side is taken too, it moves
+// just left of the chip, whose left edge is exact (the width is only an estimate), and a
+// dotted link joins it to the point.
+method dodgeChips(Layer this, float lineH) =>
+    if chipL.size() > 0 and lineH > 0
+        for g in this.path
+            if g.hide
+                continue
+            label lb = g.lb
+            int dir = g.dir
+            string base = g.base
+            // charMs is a small-size character; normal and large text are wider.
+            float hw = (f_maxLineLen(base) + 1) * charMs * (this.deg == 0 ? 1.0 : this.deg == 3 ? 1.6 : 1.25) / 2
+            float h = (str.split(base, "\n").size() + 0.6) * lineH
+            float y = lb.get_y()
+            int x = lb.get_x()
+            int hit = f_chipHit(x, hw, dir == 1 ? y : y - h, dir == 1 ? y + h : y, lineH)
+            if hit >= 0
+                int hit2 = f_chipHit(x, hw, dir == 1 ? y - h : y, dir == 1 ? y : y + h, lineH)
+                if hit2 < 0
+                    lb.set_style(dir == 1 ? label.style_label_up : label.style_label_down)
+                    lb.set_text(f_waveRender(base, -dir, 0))
+                else
+                    int nx = chipL.get(hit) - math.round(hw) - barMs
+                    lb.set_x(nx)
+                    // Dotted link from the projected point to the moved label (its near edge).
+                    // capLinks is cleared at the start of every last-bar pass.
+                    capLinks.push(line.new(x, y, nx + math.round(hw), y, xloc = xloc.bar_time,
+                         color = color.new(chart.fg_color, 45), style = line.style_dotted))
+    this
+
+// Labels arrive in degree order (L1 to L4), so a group's members are already sorted.
+f_stackWaveLabels(array<label> labs, array<int> dirs, array<string> bases) =>
+    int n = labs.size()
+    if n > 0
+        array<bool> done = array.new<bool>(n, false)
+        array<int> xs = array.new<int>()
+        array<float> ys = array.new<float>()
+        for lb in labs
+            xs.push(lb.get_x())
+            ys.push(lb.get_y())
+        for i = 0 to n - 1
+            if not done.get(i)
+                int xi = xs.get(i)
+                float yi = ys.get(i)
+                int di = dirs.get(i)
+                int pad = showSwingTags ? 1 : 0
+                bool first = true
+                for j = i to n - 1
+                    if not done.get(j) and dirs.get(j) == di and xs.get(j) == xi and ys.get(j) == yi
+                        label lj = labs.get(j)
+                        done.set(j, true)
+                        array<string> rows = str.split(bases.get(j), "\n")
+                        // The price is printed once, on the label nearest the pivot.
+                        if not first and showWavePrice and rows.size() > 0
+                            rows.set(0, str.split(rows.get(0), "  ").get(0))
+                        lj.set_text(f_waveRender(rows.join("\n"), di, pad))
+                        pad += rows.size()
+                        first := false
+    true
+
+if barstate.islast
+    while capLinks.size() > 0
+        capLinks.pop().delete()
+    chipL.clear()
+    chipR.clear()
+    chipY.clear()
+    chipN.clear()
+    for ly in layers
+        ly.tgtConf := f_confWith(ly.target)
+    float capGap = math.max(nz(visHigh - visLow) * 0.045, math.max(nz(atrV) * 0.35, syminfo.mintick * 10))
+    array<label> colA = array.new<label>()
+    array<float> priceA = array.new<float>()
+    array<color> tintA = array.new<color>()
+    for lb in srTags
+        colA.push(lb)
+        priceA.push(lb.get_y())
+        tintA.push(str.contains(lb.get_text(), "RESISTANSI") ? colRes : colSup)
+    for lv in liqLevels
+        if not na(lv.tag)
+            colA.push(lv.tag)
+            priceA.push(lv.price)
+            tintA.push(lv.buySide ? colDn : colUp)
+    for lb in paCaps
+        colA.push(lb)
+        priceA.push(lb.get_y())
+        tintA.push(f_paTint(lb.get_text()))
+    f_groupCaptions(colA, priceA, tintA, capGap, time, time + 3 * barMs)
+    array<label> projLbs = array.new<label>()
+    array<float> projPr = array.new<float>()
+    array<color> projCs = array.new<color>()
+    for ly in layers
+        ly.collectProj(projLbs, projPr, projCs)
+    int xProj = f_projRight()
+    f_groupCaptions(projLbs, projPr, projCs, capGap, xProj, xProj + 2 * barMs)
+    array<label> wLabs = array.new<label>()
+    array<int> wDirs = array.new<int>()
+    array<string> wBases = array.new<string>()
+    for ly in layers
+        ly.collectWave(wLabs, wDirs, wBases)
+    f_stackWaveLabels(wLabs, wDirs, wBases)
+    // One small text line is about 1.6% of the visible price range (capGap is the wider grouping threshold).
+    float lineH = math.max(nz(visHigh - visLow) * 0.016, syminfo.mintick * 5)
+    for ly in layers
+        ly.dodgeChips(lineH)
+
+// -- Alerts --------------------------------------------------------------
+for ly in layers
+    ly.sendAlerts()
+
+bool anyImpulse = L1.evImpulse != 0 or L2.evImpulse != 0 or L3.evImpulse != 0 or L4.evImpulse != 0
+bool anyCorr = L1.evCorr != 0 or L2.evCorr != 0 or L3.evCorr != 0 or L4.evCorr != 0
+bool anyTri = L1.evTri or L2.evTri or L3.evTri or L4.evTri
+bool anyInvalid = L1.evInvalid or L2.evInvalid or L3.evInvalid or L4.evInvalid
+alertcondition(buyW3 or buyC, "EW sinyal beli", "Sinyal beli Elliott Wave di {{ticker}} {{interval}}")
+alertcondition(sellW3 or sellC, "EW sinyal jual", "Sinyal jual Elliott Wave di {{ticker}} {{interval}}")
+alertcondition(anyImpulse, "EW impuls selesai", "Impuls Elliott Wave selesai di {{ticker}} {{interval}}")
+alertcondition(anyCorr, "EW koreksi selesai", "Koreksi Elliott Wave selesai di {{ticker}} {{interval}}")
+alertcondition(anyTri, "EW triangle selesai", "Triangle Elliott Wave selesai di {{ticker}} {{interval}}")
+alertcondition(anyInvalid, "EW hitungan batal", "Hitungan Elliott Wave batal di {{ticker}} {{interval}}")
+
+// -- Dashboard -----------------------------------------------------------
+var table dash = table.new(f_pos(tablePos), 8, 11, bgcolor = color.new(chart.bg_color, 5), frame_color = color.new(chart.fg_color, 70),
+     frame_width = 1, border_color = color.new(chart.fg_color, 85), border_width = 1)
+
+if showTable and barstate.isfirst
+    for r = 5 to 10
+        dash.merge_cells(1, r, 7, r)
+
+if showTable and barstate.islast
+    string sz = f_textSize(tableSize)
+    color fg = chart.fg_color
+    color hdr = color.new(chart.fg_color, 88)
+    dash.cell(0, 0, "Derajat", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(1, 0, "TF", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(2, 0, "Hitungan gelombang", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(3, 0, "Bias", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(4, 0, "Swing", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(5, 0, "Skor impuls", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(6, 0, "Invalidasi", text_color = fg, bgcolor = hdr, text_size = sz)
+    dash.cell(7, 0, "Target", text_color = fg, bgcolor = hdr, text_size = sz)
+    for [i, ly] in layers
+        ly.dashRow(dash, i + 1, sz)
+    int nAct = (L1.active ? 1 : 0) + (L2.active ? 1 : 0) + (L3.active ? 1 : 0) + (L4.active ? 1 : 0)
+    int sumBias = (L1.active ? L1.bias : 0) + (L2.active ? L2.bias : 0) + (L3.active ? L3.bias : 0) + (L4.active ? L4.bias : 0)
+    int sgn = sumBias > 0 ? 1 : sumBias < 0 ? -1 : 0
+    int agree = (L1.active and L1.bias == sgn ? 1 : 0) + (L2.active and L2.bias == sgn ? 1 : 0) +
+         (L3.active and L3.bias == sgn ? 1 : 0) + (L4.active and L4.bias == sgn ? 1 : 0)
+    int nBias = (L1.active and L1.bias != 0 ? 1 : 0) + (L2.active and L2.bias != 0 ? 1 : 0) + (L3.active and L3.bias != 0 ? 1 : 0) + (L4.active and L4.bias != 0 ? 1 : 0)
+    string confTxt = sgn == 1 ? "Naik" : sgn == -1 ? "Turun" : nBias == 0 ? "Netral, belum ada derajat dengan bias" : "Campuran, bias antarderajat saling berlawanan"
+    color confCol = sgn == 1 ? colUp : sgn == -1 ? colDn : color.new(colInv, 40)
+    dash.cell(0, 5, "Konfluensi MTF", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+    dash.cell(1, 5, sgn == 0 ? confTxt : confTxt + " (" + str.tostring(agree) + " dari " + str.tostring(nAct) + " derajat)", text_color = color.white, bgcolor = confCol, text_size = sz)
+    float liqUp = na
+    float liqDn = na
+    for lv in liqLevels
+        if lv.buySide and lv.price > close and (na(liqUp) or lv.price < liqUp)
+            liqUp := lv.price
+        if not lv.buySide and lv.price < close and (na(liqDn) or lv.price > liqDn)
+            liqDn := lv.price
+    string msTxt = (msTrend == 1 ? "Naik" : msTrend == -1 ? "Turun" : "Belum terbentuk") + ", kejadian terakhir: " + msEvent
+    string srTxt = showSr ? "Resistansi " + f_fmt(nearRes) + "   |   Support " + f_fmt(nearSup) : "Nonaktif"
+    string liqTxt = showLiq ? "BSL " + f_fmt(liqUp) + "   |   SSL " + f_fmt(liqDn) : "Nonaktif"
+    string maTxt = (close > ma3 ? "Harga di atas " : "Harga di bawah ") + maType + " " + str.tostring(ma3Len) + ", " + maType + " " + str.tostring(ma1Len) +
+         (ma1 > ma2 ? " di atas " : " di bawah ") + maType + " " + str.tostring(ma2Len)
+    color msCol = msTrend == 1 ? colUp : msTrend == -1 ? colDn : fg
+    color maCol = close > ma3 and ma1 > ma2 ? colUp : close < ma3 and ma1 < ma2 ? colDn : fg
+    dash.cell(0, 6, "Struktur pasar", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+    dash.cell(1, 6, msTxt, text_color = f_txt(msCol), text_size = sz)
+    dash.cell(0, 7, "S/R terdekat", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+    dash.cell(1, 7, srTxt, text_color = fg, text_size = sz)
+    dash.cell(0, 8, "Likuiditas terdekat", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+    dash.cell(1, 8, liqTxt, text_color = fg, text_size = sz)
+    dash.cell(0, 9, "Moving average", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+    dash.cell(1, 9, maTxt, text_color = f_txt(maCol), text_size = sz)
+    if ewOn and cycOn and not na(cycNext)
+        float mLeft = (cycNext - time) / (30.44 * 86400000.0)
+        dash.cell(0, 10, "Siklus waktu", text_color = fg, bgcolor = hdr, text_size = sz, text_halign = text.align_left)
+        dash.cell(1, 10, "Siklus " + str.tostring(cycMonths) + " bulan sejak " + str.format_time(cycStart, "MMM yyyy", "UTC") +
+             ", perkiraan dasar siklus berikutnya " + str.format_time(cycNext, "MMM yyyy", "UTC") + " (" + str.tostring(mLeft, "#.#") + " bulan lagi)",
+             text_color = fg, text_size = sz)
